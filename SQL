@@ -1,0 +1,10 @@
+
+
+SELECT s.id AS service_id, b.id AS branch_id, ROUND(AVG(time_taken),2) AS avg_time_taken, MAX(time_taken) AS max_time_taken
+FROM request AS r
+INNER JOIN service AS s 
+ON s.id = r.service_id
+INNER JOIN branch AS b
+ON b.id = r.branch_id
+GROUP BY b.id, s.id
+
