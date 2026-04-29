@@ -22,5 +22,5 @@ SELECT "Patient ID",
 FROM 'SEER_LUNG_11_14_EXT.csv'
 WHERE "Site recode ICD-O-3 2023 Revision Expanded" == 'Lung And Bronchus'
 AND "COD to site recode ICD-O-3 2023 Revision Expanded (1999+)" IN ('Lung And Bronchus','Alive')
---- AND "Year of diagnosis" HAVING ('2011','2012','2013','2014')
+AND "Year of diagnosis" HAVING ('2011','2012','2013','2014')
 
