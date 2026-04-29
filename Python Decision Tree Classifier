@@ -1,0 +1,459 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.tree import DecisionTreeRegressor  # Changed from Classifier to Regressor
+from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import seaborn as sns
+
+# Load SEER lung cancer data
+# df = SEER_SQL_Output
+
+# Check data types and info
+print("Original Dataset Info:")
+print(df.info())
+print("\nFirst few rows:")
+print(df.head())
+
+# Check for missing values
+print("\nMissing values per column:")
+print(df.isnull().sum())
+
+# ============================================================
+# STEP 1: DATA CLEANING
+# ============================================================
+
+# Remove duplicates
+print(f"\nRows before removing duplicates: {len(df)}")
+df = df.drop_duplicates()
+print(f"Rows after removing duplicates: {len(df)}")
+
+# ============================================================
+# STEP 2: CREATE TARGET VARIABLE (SURVIVAL MONTHS)
+# ============================================================
+
+def extract_survival_months(months_str):
+    """Extract numeric survival months from SEER format"""
+    if pd.isna(months_str) or 'NULL' in str(months_str) or 'Unknown' in str(months_str):
+        return np.nan
+    try:
+        import re
+        numbers = re.findall(r'\d+', str(months_str))
+        if numbers:
+            return int(numbers[0])
+        return np.nan
+    except:
+        return np.nan
+
+# Extract survival months
+df['Survival_Months_Numeric'] = df['Survival months with NULL'].apply(extract_survival_months)
+
+print("\nSurvival Months Statistics:")
+print(df['Survival_Months_Numeric'].describe())
+print(f"\nMissing survival months: {df['Survival_Months_Numeric'].isna().sum()}")
+
+# Drop rows where target (survival months) is missing
+# We need a target to train the model
+df = df[df['Survival_Months_Numeric'].notna()].copy()
+print(f"\nRows after dropping missing target: {len(df)}")
+
+# ============================================================
+# STEP 3: FEATURE ENGINEERING - AGE (USING MEAN OF RANGE)
+# ============================================================
+
+def extract_age_mean(age_str):
+    """
+    Extract mean age from SEER age format.
+    Examples:
+    - "00 years" → 0
+    - "01-04 years" → (1+4)/2 = 2.5
+    - "85-89 years" → (85+89)/2 = 87
+    - "90+ years" → 92 (assuming mean of 90-95)
+    """
+    if pd.isna(age_str):
+        return np.nan
+    
+    age_str = str(age_str).strip()
+    
+    # Handle special cases
+    if '90+' in age_str or '90 years' in age_str:
+        return 92  # Assume mean of 90-95
+    if '<1' in age_str or '00 years' in age_str:
+        return 0.5  # Assume mean of 0-1
+    
+    try:
+        import re
+        # Extract all numbers from the string
+        numbers = re.findall(r'\d+', age_str)
+        
+        if len(numbers) == 0:
+            return np.nan
+        elif len(numbers) == 1:
+            # Single age value
+            return float(numbers[0])
+        else:
+            # Range of ages - take the mean
+            ages = [float(num) for num in numbers]
+            return np.mean(ages)
+    except:
+        return np.nan
+
+# Apply the function
+df['Age_Mean'] = df['Age recode with <1 year olds and 90+'].apply(extract_age_mean)
+
+print("\nAge Mean Statistics:")
+print(df['Age_Mean'].describe())
+print(f"Missing age values: {df['Age_Mean'].isna().sum()}")
+
+# ============================================================
+# STEP 4: FEATURE ENGINEERING - OTHER NUMERIC FEATURES
+# ============================================================
+
+# Tumor Size
+def extract_tumor_size(size_str):
+    """Extract numeric tumor size in mm"""
+    if pd.isna(size_str) or 'Unknown' in str(size_str) or 'NULL' in str(size_str):
+        return np.nan
+    try:
+        import re
+        numbers = re.findall(r'\d+', str(size_str))
+        if numbers:
+            return float(numbers[0])
+        return np.nan
+    except:
+        return np.nan
+
+df['Tumor_Size_mm'] = df['Tumor Size Over Time Recode (1988+) with NULL'].apply(extract_tumor_size)
+
+# Treatment Days
+def extract_treatment_days(days_str):
+    """Extract numeric treatment days"""
+    if pd.isna(days_str) or 'NULL' in str(days_str) or 'Unknown' in str(days_str):
+        return np.nan
+    try:
+        import re
+        numbers = re.findall(r'\d+', str(days_str))
+        if numbers:
+            return int(numbers[0])
+        return np.nan
+    except:
+        return np.nan
+
+df['Treatment_Days'] = df['Time from diagnosis to treatment in days recode with NULL'].apply(extract_treatment_days)
+
+print("\nNumeric Features Statistics:")
+print(f"Tumor Size - Missing: {df['Tumor_Size_mm'].isna().sum()}, Mean: {df['Tumor_Size_mm'].mean():.2f}")
+print(f"Treatment Days - Missing: {df['Treatment_Days'].isna().sum()}, Mean: {df['Treatment_Days'].mean():.2f}")
+
+# ============================================================
+# STEP 5: ENCODE CATEGORICAL VARIABLES
+# ============================================================
+
+# Identify categorical columns to encode
+categorical_cols = [
+    'Sex',
+    'Marital status at diagnosis',
+    'SEER historic stage A (1973-2015)',
+    'Derived Summary Grade 2018 (2018+) with NULL',
+    'RX Summ--Surg Prim Site (1998+)',
+    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)'
+]
+
+# Fill missing categorical values with 'Unknown'
+for col in categorical_cols:
+    if col in df.columns:
+        df[col].fillna('Unknown', inplace=True)
+        
+        # Label encode
+        le = LabelEncoder()
+        df[col + '_Encoded'] = le.fit_transform(df[col].astype(str))
+        print(f"\nEncoded {col}: {df[col].nunique()} unique values")
+
+# ============================================================
+# STEP 6: STANDARDIZE NUMERIC FEATURES (WITH NULLS PRESERVED)
+# ============================================================
+
+# DO NOT fill missing values - keep them as NaN
+# Decision trees can handle missing values natively in scikit-learn >= 1.3
+
+# Standardize numeric features while preserving NaN
+scaler = StandardScaler()
+
+numeric_features = ['Age_Mean', 'Tumor_Size_mm', 'Treatment_Days']
+
+for col in numeric_features:
+    # Create a mask for non-null values
+    mask = df[col].notna()
+    
+    # Standardize only non-null values
+    if mask.sum() > 0:  # Only if there are non-null values
+        df.loc[mask, col + '_Scaled'] = scaler.fit_transform(df.loc[mask, [col]])
+        # NaN values will remain NaN in the scaled column
+        df.loc[~mask, col + '_Scaled'] = np.nan
+    else:
+        df[col + '_Scaled'] = np.nan
+    
+    print(f"\n{col}_Scaled - Missing values preserved: {df[col + '_Scaled'].isna().sum()}")
+
+# ============================================================
+# STEP 7: SELECT FEATURES AND TARGET
+# ============================================================
+
+# Select features for modeling
+feature_columns = [
+    'Age_Mean_Scaled',
+    'Tumor_Size_mm_Scaled',
+    'Treatment_Days_Scaled',
+    'Year of diagnosis',
+    'Sex_Encoded',
+    'Marital status at diagnosis_Encoded',
+    'SEER historic stage A (1973-2015)_Encoded',
+    'Derived Summary Grade 2018 (2018+) with NULL_Encoded',
+    'RX Summ--Surg Prim Site (1998+)_Encoded',
+    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded'
+]
+
+# Create feature matrix X and target y
+X = df[feature_columns].copy()
+y = df['Survival_Months_Numeric'].copy()
+
+print("\n" + "="*60)
+print("FEATURE SUMMARY")
+print("="*60)
+print(f"\nDataset size: {len(X)} patients")
+print(f"Number of features: {X.shape[1]}")
+print(f"\nMissing values per feature:")
+print(X.isnull().sum())
+print(f"\nTarget variable (Survival Months) statistics:")
+print(y.describe())
+
+# ============================================================
+# STEP 8: TRAIN-TEST SPLIT
+# ============================================================
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=31
+)
+
+print(f"\n\nTraining set: {len(X_train)} patients")
+print(f"Test set: {len(X_test)} patients")
+
+# ============================================================
+# STEP 9: TRAIN DECISION TREE REGRESSOR
+# ============================================================
+
+# NOTE: For scikit-learn to handle missing values natively,
+# you need version >= 1.3.0
+# Check version:
+import sklearn
+print(f"\nscikit-learn version: {sklearn.__version__}")
+
+# Instantiate Decision Tree Regressor with missing value support
+dt_model = DecisionTreeRegressor(
+    max_depth=10,
+    min_samples_split=100,
+    min_samples_leaf=50,
+    random_state=31,
+    # This parameter allows the model to handle missing values
+    # Available in scikit-learn >= 1.3
+    # If you get an error, either upgrade sklearn or drop rows with NaN
+    splitter='best'  
+)
+
+print("\nTraining Decision Tree Regressor...")
+print("Note: Model will handle missing values natively")
+
+try:
+    # Train the model
+    dt_model.fit(X_train, y_train)
+    print("Training complete!")
+except Exception as e:
+    print(f"\nError during training: {e}")
+    print("\nIf error is about missing values, you have two options:")
+    print("1. Upgrade scikit-learn: pip install --upgrade scikit-learn")
+    print("2. Drop rows with missing values before training")
+    
+    # Fallback: Drop rows with missing values
+    print("\nFalling back to dropping missing values...")
+    X_train_clean = X_train.dropna()
+    y_train_clean = y_train[X_train_clean.index]
+    X_test_clean = X_test.dropna()
+    y_test_clean = y_test[X_test_clean.index]
+    
+    print(f"Clean training set: {len(X_train_clean)} patients")
+    print(f"Clean test set: {len(X_test_clean)} patients")
+    
+    dt_model.fit(X_train_clean, y_train_clean)
+    X_train, y_train = X_train_clean, y_train_clean
+    X_test, y_test = X_test_clean, y_test_clean
+    print("Training complete with cleaned data!")
+
+# ============================================================
+# STEP 10: MAKE PREDICTIONS AND EVALUATE
+# ============================================================
+
+# Make predictions
+y_pred_train = dt_model.predict(X_train)
+y_pred_test = dt_model.predict(X_test)
+
+# Calculate regression metrics
+train_rmse = np.sqrt(mean_squared_error(y_train, y_pred_train))
+test_rmse = np.sqrt(mean_squared_error(y_test, y_pred_test))
+train_mae = mean_absolute_error(y_train, y_pred_train)
+test_mae = mean_absolute_error(y_test, y_pred_test)
+train_r2 = r2_score(y_train, y_pred_train)
+test_r2 = r2_score(y_test, y_pred_test)
+
+# Print results
+print("\n" + "="*60)
+print("MODEL PERFORMANCE RESULTS - SURVIVAL PREDICTION")
+print("="*60)
+print("\nRegression Metrics:")
+print(f"\nTest Set Performance:")
+print(f"  RMSE (Root Mean Squared Error): {test_rmse:.2f} months")
+print(f"  MAE (Mean Absolute Error): {test_mae:.2f} months")
+print(f"  R² Score: {test_r2:.3f}")
+
+print(f"\nTraining Set Performance:")
+print(f"  RMSE: {train_rmse:.2f} months")
+print(f"  MAE: {train_mae:.2f} months")
+print(f"  R² Score: {train_r2:.3f}")
+
+print(f"\nOverfitting Check:")
+print(f"  R² difference (train - test): {(train_r2 - test_r2):.3f}")
+if train_r2 - test_r2 > 0.1:
+    print("  ⚠️ Warning: Model may be overfitting")
+else:
+    print("  ✓ Overfitting within acceptable range")
+
+# ============================================================
+# STEP 11: VISUALIZE PREDICTIONS
+# ============================================================
+
+# Scatter plot: Actual vs Predicted
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, y_pred_test, alpha=0.3, s=10)
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 
+         'r--', lw=2, label='Perfect Prediction')
+plt.xlabel('Actual Survival Months', fontsize=12)
+plt.ylabel('Predicted Survival Months', fontsize=12)
+plt.title(f'Actual vs Predicted Survival Months\nR² = {test_r2:.3f}, RMSE = {test_rmse:.2f}', 
+          fontsize=14)
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('survival_prediction_scatter.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# Residuals plot
+residuals = y_test - y_pred_test
+plt.figure(figsize=(10, 6))
+plt.scatter(y_pred_test, residuals, alpha=0.3, s=10)
+plt.axhline(y=0, color='r', linestyle='--', lw=2)
+plt.xlabel('Predicted Survival Months', fontsize=12)
+plt.ylabel('Residuals (Actual - Predicted)', fontsize=12)
+plt.title('Residual Plot: Checking for Bias', fontsize=14)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('residuals_plot.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# Distribution of predictions vs actual
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+plt.hist(y_test, bins=50, alpha=0.7, label='Actual', color='blue', edgecolor='black')
+plt.xlabel('Survival Months', fontsize=12)
+plt.ylabel('Frequency', fontsize=12)
+plt.title('Distribution of Actual Survival', fontsize=14)
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.subplot(1, 2, 2)
+plt.hist(y_pred_test, bins=50, alpha=0.7, label='Predicted', color='orange', edgecolor='black')
+plt.xlabel('Survival Months', fontsize=12)
+plt.ylabel('Frequency', fontsize=12)
+plt.title('Distribution of Predicted Survival', fontsize=14)
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('survival_distributions.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# ============================================================
+# STEP 12: FEATURE IMPORTANCE ANALYSIS
+# ============================================================
+
+# Get feature importances
+feature_importance = pd.Series(
+    dt_model.feature_importances_, 
+    index=X_train.columns
+).sort_values(ascending=False)
+
+# Plot top 10 most important features
+plt.figure(figsize=(10, 6))
+feature_importance.nlargest(10).plot(kind='barh', color='steelblue')
+plt.title("Top 10 Feature Importance: Lung Cancer Survival Prediction", fontsize=14)
+plt.xlabel("Importance Score", fontsize=12)
+plt.ylabel("Feature", fontsize=12)
+plt.tight_layout()
+plt.savefig('feature_importance_survival.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+print("\n" + "="*60)
+print("TOP 10 MOST IMPORTANT FEATURES")
+print("="*60)
+for i, (feature, importance) in enumerate(feature_importance.nlargest(10).items(), 1):
+    print(f"{i:2d}. {feature:50s} {importance:.4f}")
+
+# ============================================================
+# STEP 13: PREDICTION INTERVALS
+# ============================================================
+
+# Calculate prediction errors
+errors = np.abs(y_test - y_pred_test)
+error_percentiles = np.percentile(errors, [50, 75, 90, 95])
+
+print("\n" + "="*60)
+print("PREDICTION ERROR ANALYSIS")
+print("="*60)
+print(f"\nMedian Absolute Error: {error_percentiles[0]:.2f} months")
+print(f"75th Percentile Error: {error_percentiles[1]:.2f} months")
+print(f"90th Percentile Error: {error_percentiles[2]:.2f} months")
+print(f"95th Percentile Error: {error_percentiles[3]:.2f} months")
+
+# ============================================================
+# STEP 14: SAVE RESULTS
+# ============================================================
+
+# Save the trained model
+import pickle
+with open('lung_cancer_survival_dt_model.pkl', 'wb') as f:
+    pickle.dump(dt_model, f)
+print("\nModel saved as 'lung_cancer_survival_dt_model.pkl'")
+
+# Save feature importance
+feature_importance.to_csv('feature_importance_survival.csv')
+print("Feature importance saved as 'feature_importance_survival.csv'")
+
+# Save predictions
+results_df = pd.DataFrame({
+    'Actual_Survival_Months': y_test.values,
+    'Predicted_Survival_Months': y_pred_test,
+    'Absolute_Error': np.abs(y_test.values - y_pred_test),
+    'Percentage_Error': np.abs(y_test.values - y_pred_test) / y_test.values * 100
+})
+results_df.to_csv('lung_cancer_survival_predictions.csv', index=False)
+print("Predictions saved as 'lung_cancer_survival_predictions.csv'")
+
+print("\n" + "="*60)
+print("ANALYSIS COMPLETE!")
+print("="*60)
+print(f"\nKey Takeaways:")
+print(f"  • Model predicts survival with MAE of {test_mae:.2f} months")
+print(f"  • R² of {test_r2:.3f} means model explains {test_r2*100:.1f}% of variance")
+print(f"  • Most important features saved to CSV")
+print(f"  • {X.isnull().sum().sum()} missing values handled natively by model")
