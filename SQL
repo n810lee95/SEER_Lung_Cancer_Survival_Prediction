@@ -1,10 +1,26 @@
+SELECT "Patient ID",
+	"Age recode with <1 year olds and 90+",
+	"Sex",
+	"Marital status at diagnosis",
+	"Year of diagnosis",
+	"SEER historic stage A (1973-2015)",
+	CASE WHEN "Derived Summary Grade 2018 (2018+)" IN ('Blank(s)') THEN NULL 
+        ELSE "Derived Summary Grade 2018 (2018+)"
+    END AS "Derived Summary Grade 2018 (2018+) with NULL",
+	"RX Summ--Surg Prim Site (1998+)",
+	CASE WHEN "Time from diagnosis to treatment in days recode" IN ('Unable to calculate') THEN NULL 
+        ELSE "Time from diagnosis to treatment in days recode"
+    END AS "Time from diagnosis to treatment in days recode with NULL",
+	CASE WHEN "Tumor Size Over Time Recode (1988+)" IN ('Unknown or size unreasonable (includes any tumor sizes 401-989)') THEN NULL 
+        ELSE "Tumor Size Over Time Recode (1988+)"
+    END AS "Tumor Size Over Time Recode (1988+) with NULL",
+	CASE WHEN "Survival months" IN ('Unknown') THEN NULL 
+        ELSE "Survival months"
+    END AS "Survival months with NULL",
+	"COD to site recode ICD-O-3 2023 Revision Expanded (1999+)"
 
-
-SELECT s.id AS service_id, b.id AS branch_id, ROUND(AVG(time_taken),2) AS avg_time_taken, MAX(time_taken) AS max_time_taken
-FROM request AS r
-INNER JOIN service AS s 
-ON s.id = r.service_id
-INNER JOIN branch AS b
-ON b.id = r.branch_id
-GROUP BY b.id, s.id
+FROM 'SEER_LUNG_11_14_EXT.csv'
+WHERE "Site recode ICD-O-3 2023 Revision Expanded" == 'Lung And Bronchus'
+AND "COD to site recode ICD-O-3 2023 Revision Expanded (1999+)" IN ('Lung And Bronchus','Alive')
+--- AND "Year of diagnosis" HAVING ('2011','2012','2013','2014')
 
