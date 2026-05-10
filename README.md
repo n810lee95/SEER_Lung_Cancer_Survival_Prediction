@@ -1,12 +1,13 @@
 # SEER-Surveillance-Epidemiology-and-End-Results-Program-Analysis
 Analysis of Lung Cancer Tumors Using SEER Database Extract
 
+Please note that SEER_LUNG_11_14_EXT.csv is an example file that is truncated to only records from 2014 - 2014. The full analysis from this READ.ME includes records from all years.  
 
 Citation: Surveillance, Epidemiology, and End Results (SEER) Program (www.seer.cancer.gov) SEER*Stat Database: Incidence - SEER Research Data, 17 Registries, Nov 2024 Sub (2000-2022) - Linked To County Attributes - Time Dependent (1990-2023) Income/Rurality, 1969-2023 Counties, National Cancer Institute, DCCPS, Surveillance Research Program, released April 2025, based on the November 2024 submission.
 
 Filename:  
 SEER*Stat Version:  9.0.43.0
-Date:  April 14, 2026
+Date:  May 10, 2026
 
 Session Type:                                         Case Listing
 
@@ -22,7 +23,7 @@ Use Summary Files:                                    No
 
 SELECTION
 Select Only:                                          Malignant Behavior, Known Age
-Case:                                                  {Race, Sex, Year Dx.Year of diagnosis} = '2014','2015','2016'
+Case:                                                  {Site and Morphology.Site recode ICD-O-3 2023 Revision Expanded} = '    Lung And Bronchus'
 
 TABLE
 Column:                                               Patient ID
@@ -56,9 +57,9 @@ USER DEFINITIONS
 PROPERTIES
 Database                                              Incidence - SEER Research Data, 17 Registries, Nov 2024 Sub (2000-2022)
 Statistic                                             Case Listing
-Row Count                                             1,266,926
-Creation Time                                         53.00 seconds
-Submitted                                             Tuesday, April 14, 2026 03:22 PM
+Row Count                                             1,105,791
+Creation Time                                         178.00 seconds
+Submitted                                             Sunday, May 10, 2026 12:06 PM
 Information                                           
     Number of Input Records Read                      10,334,116
                                                       
@@ -66,13 +67,13 @@ Information
                                                       Selected       Excluded       Statement      
                                                       ----------     ----------     ------------------------------------------
                                                                                     User Selection (Case)
-                                                      1,447,465      8,886,651       {Year of diagnosis} = '2014','2015','2016'
+                                                      1,108,316      9,225,800       {Site recode ICD-O-3 2023 Revision Expanded} = '    Lung And Bronchus'
                                                                                                    
                                                                                     Standard Exclusions
-                                                      1,266,941      180,524        Select only malignant cancers
-                                                      1,266,926      15             Select only known age
+                                                      1,105,803      2,513          Select only malignant cancers
+                                                      1,105,791      12             Select only known age
                                                       
-    Number of Case Records Used For Analysis          1,266,926
+    Number of Case Records Used For Analysis          1,105,791
                                                       
                                                       
                                                       Column:        Patient ID     
@@ -96,3 +97,4 @@ Information
                                                       
                                                       
                                                       
+
