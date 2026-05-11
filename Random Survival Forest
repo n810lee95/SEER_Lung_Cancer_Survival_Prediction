@@ -1,0 +1,610 @@
+# ============================================================
+# LUNG CANCER SURVIVAL PREDICTION - RANDOM SURVIVAL FOREST
+# Standalone script based on Decision Tree script structure
+#
+# Key differences from DT script:
+#   - Target is a structured survival array (event, time) not raw months
+#   - Censoring is inferred from COD column (not all patients die of lung cancer)
+#   - RSF.predict() returns concordance-based risk scores, not raw months
+#   - Permutation importance runs on a subsample to avoid memory errors
+#   - feature_importances_ not available in sksurv — permutation used instead
+# ============================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+from sklearn.inspection import permutation_importance
+from sksurv.ensemble import RandomSurvivalForest
+from sksurv.util import Surv
+from sksurv.metrics import concordance_index_censored
+import pickle
+
+# ============================================================
+# STEP 1: LOAD DATA
+# ============================================================
+
+print("="*60)
+print("STEP 1: LOADING DATA")
+print("="*60)
+
+df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER_SQL_Output.csv")
+
+print(f"Original Dataset size: {len(df)} patients")
+print(f"Number of columns: {len(df.columns)}")
+print(f"\nColumn names:")
+for col in df.columns:
+    print(f"  {col}")
+
+# ============================================================
+# STEP 2: DATA CLEANING
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 2: DATA CLEANING")
+print("="*60)
+
+print(f"Rows before removing duplicates: {len(df)}")
+df = df.drop_duplicates()
+print(f"Rows after removing duplicates: {len(df)}")
+
+# ============================================================
+# STEP 3: CREATE TARGET VARIABLE (SURVIVAL MONTHS)
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 3: CREATING TARGET VARIABLE")
+print("="*60)
+
+df['Survival_Months_Numeric'] = df['Survival months with NULL'].copy()
+
+print(f"Survival Months Statistics:")
+print(f"  Count: {df['Survival_Months_Numeric'].notna().sum()}")
+print(f"  Mean:  {df['Survival_Months_Numeric'].mean():.2f}")
+print(f"  Median:{df['Survival_Months_Numeric'].median():.2f}")
+print(f"  Min:   {df['Survival_Months_Numeric'].min():.0f}")
+print(f"  Max:   {df['Survival_Months_Numeric'].max():.0f}")
+print(f"  Missing: {df['Survival_Months_Numeric'].isna().sum()}")
+
+df = df[df['Survival_Months_Numeric'].notna()].copy()
+print(f"\nRows after dropping missing target: {len(df)}")
+
+# ============================================================
+# STEP 3b: CREATE EVENT INDICATOR (CENSORING)
+# ============================================================
+# This is the key difference from a regression model.
+# RSF requires knowing WHETHER the event (death) occurred,
+# not just how long the patient survived.
+#
+# If COD = lung cancer → event = True  (died of disease)
+# If COD = other/alive → event = False (censored — still alive
+#                                        or died of something else)
+#
+# Using the COD column: value 2 = "Lung and Bronchus" in the
+# ICD-O-3 2023 recode. Adjust the value below if your encoding differs.
+
+print("\n" + "="*60)
+print("STEP 3b: CREATING EVENT INDICATOR")
+print("="*60)
+
+cod_col = 'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)'
+
+if cod_col in df.columns:
+    print(f"COD column unique values:")
+    print(df[cod_col].value_counts().head(10))
+
+    # Event = True if patient died of lung cancer
+    # Adjust the string match if your data uses different labels
+    lung_cancer_cod_values = [
+        'Lung and Bronchus',
+        'Lung',
+        'Bronchus',
+    ]
+    df['Event'] = df[cod_col].astype(str).str.contains(
+        '|'.join(lung_cancer_cod_values), case=False, na=False
+    )
+else:
+    # Fallback: assume all patients experienced the event
+    print(f"⚠️ COD column not found — assuming all patients died of disease (no censoring)")
+    df['Event'] = True
+
+event_counts = df['Event'].value_counts()
+print(f"\nEvent distribution:")
+print(f"  Died of lung cancer (event=True):  {event_counts.get(True, 0):>8,} ({event_counts.get(True, 0)/len(df)*100:.1f}%)")
+print(f"  Censored (event=False):            {event_counts.get(False, 0):>8,} ({event_counts.get(False, 0)/len(df)*100:.1f}%)")
+
+# Survival time must be > 0 for RSF (log-rank requires positive times)
+df = df[df['Survival_Months_Numeric'] > 0].copy()
+print(f"\nRows after removing 0-month survival: {len(df)}")
+
+# ============================================================
+# STEP 4: FEATURE ENGINEERING - AGE
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 4: FEATURE ENGINEERING - AGE")
+print("="*60)
+
+def extract_age_mean(age_str):
+    if pd.isna(age_str):
+        return np.nan
+    age_str = str(age_str).strip()
+    if '90+' in age_str or '90 years' in age_str:
+        return 92
+    if '<1' in age_str or '00 years' in age_str:
+        return 0.5
+    try:
+        import re
+        numbers = re.findall(r'\d+', age_str)
+        if len(numbers) == 0:
+            return np.nan
+        elif len(numbers) == 1:
+            return float(numbers[0])
+        else:
+            return np.mean([float(n) for n in numbers])
+    except:
+        return np.nan
+
+df['Age_Mean'] = df['Age recode with <1 year olds and 90+'].apply(extract_age_mean)
+print(f"Age_Mean Statistics:")
+print(f"  Non-null: {df['Age_Mean'].notna().sum()}")
+print(f"  Mean: {df['Age_Mean'].mean():.2f}")
+print(f"  Missing: {df['Age_Mean'].isna().sum()}")
+
+# ============================================================
+# STEP 5: FEATURE ENGINEERING - TUMOR SIZE
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 5: FEATURE ENGINEERING - TUMOR SIZE")
+print("="*60)
+
+def extract_tumor_size(size_str):
+    if pd.isna(size_str) or 'Unknown' in str(size_str) or 'NULL' in str(size_str):
+        return np.nan
+    try:
+        import re
+        numbers = re.findall(r'\d+', str(size_str))
+        if numbers:
+            return float(numbers[0])
+        return np.nan
+    except:
+        return np.nan
+
+df['Tumor_Size_mm'] = df['Tumor Size Over Time Recode (1988+) with NULL'].apply(extract_tumor_size)
+print(f"Tumor Size - Missing: {df['Tumor_Size_mm'].isna().sum()}, Mean: {df['Tumor_Size_mm'].mean():.2f}")
+
+# ============================================================
+# STEP 6: FEATURE ENGINEERING - TREATMENT DAYS
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 6: FEATURE ENGINEERING - TREATMENT DAYS")
+print("="*60)
+
+def extract_treatment_days(days_str):
+    if pd.isna(days_str) or 'NULL' in str(days_str) or 'Unknown' in str(days_str):
+        return np.nan
+    try:
+        import re
+        numbers = re.findall(r'\d+', str(days_str))
+        if numbers:
+            return int(numbers[0])
+        return np.nan
+    except:
+        return np.nan
+
+df['Treatment_Days'] = df['Time from diagnosis to treatment in days recode with NULL'].apply(extract_treatment_days)
+print(f"Treatment Days - Missing: {df['Treatment_Days'].isna().sum()}, Mean: {df['Treatment_Days'].mean():.2f}")
+
+# ============================================================
+# STEP 7: ENCODE CATEGORICAL VARIABLES
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 7: ENCODING CATEGORICAL VARIABLES")
+print("="*60)
+
+categorical_cols = [
+    'Sex',
+    'Marital status at diagnosis',
+    'SEER historic stage A (1973-2015)',
+    'Derived Summary Grade 2018 (2018+) with NULL',
+    'RX Summ--Surg Prim Site (1998+)',
+    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)'
+]
+
+for col in categorical_cols:
+    if col in df.columns:
+        df[col] = df[col].fillna('Unknown')
+        le = LabelEncoder()
+        df[col + '_Encoded'] = le.fit_transform(df[col].astype(str))
+        print(f"  Encoded {col}: {df[col].nunique()} unique values")
+
+# ============================================================
+# STEP 8: STANDARDIZE NUMERIC FEATURES (MEDIAN IMPUTATION)
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 8: STANDARDIZING + IMPUTING NUMERIC FEATURES")
+print("="*60)
+
+scaler = StandardScaler()
+numeric_features = ['Age_Mean', 'Tumor_Size_mm', 'Treatment_Days']
+
+for col in numeric_features:
+    median_val = df[col].median()
+    missing_count = df[col].isna().sum()
+    df[col] = df[col].fillna(median_val)
+    df[[col]] = scaler.fit_transform(df[[col]])
+    print(f"  {col}: filled {missing_count} missing with median {median_val:.2f}, then standardized")
+
+# ============================================================
+# STEP 9: SELECT FEATURES
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 9: SELECTING FEATURES")
+print("="*60)
+
+feature_columns = [
+    'Age_Mean',
+    'Tumor_Size_mm',
+    'Treatment_Days',
+    'Year of diagnosis',
+    'Sex_Encoded',
+    'Marital status at diagnosis_Encoded',
+    'SEER historic stage A (1973-2015)_Encoded',
+    'Derived Summary Grade 2018 (2018+) with NULL_Encoded',
+    'RX Summ--Surg Prim Site (1998+)_Encoded',
+    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded'
+]
+
+X = df[feature_columns].copy().astype(np.float64)
+y_time  = df['Survival_Months_Numeric'].values
+y_event = df['Event'].values.astype(bool)
+
+print(f"Feature matrix: {X.shape[0]} patients, {X.shape[1]} features")
+print(f"Missing values: {X.isnull().sum().sum()} (should be 0)")
+
+# Build structured survival array required by sksurv
+y_surv = Surv.from_arrays(event=y_event, time=y_time)
+print(f"\nSurvival array created:")
+print(f"  Events (True=died of LC): {y_event.sum():,} ({y_event.mean()*100:.1f}%)")
+print(f"  Censored (False):         {(~y_event).sum():,} ({(~y_event).mean()*100:.1f}%)")
+
+# ============================================================
+# STEP 10: TRAIN-TEST SPLIT
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 10: TRAIN-TEST SPLIT")
+print("="*60)
+
+# Keep raw time/event arrays aligned with X for later evaluation
+(X_train, X_test,
+ y_train_surv, y_test_surv,
+ y_train_time, y_test_time,
+ y_train_event, y_test_event) = train_test_split(
+    X, y_surv, y_time, y_event,
+    test_size=0.2,
+    random_state=31
+)
+
+print(f"Training set: {len(X_train):,} patients ({len(X_train)/len(X)*100:.1f}%)")
+print(f"Test set:     {len(X_test):,} patients ({len(X_test)/len(X)*100:.1f}%)")
+
+# ============================================================
+# STEP 11: TRAIN RANDOM SURVIVAL FOREST
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 11: TRAINING RANDOM SURVIVAL FOREST")
+print("="*60)
+
+rsf_model = RandomSurvivalForest(
+    n_estimators=100,
+    max_depth=15,
+    min_samples_split=50,
+    min_samples_leaf=25,
+    max_features='sqrt',     # Standard RF heuristic
+    n_jobs=-1,
+    random_state=31
+)
+
+print("Model parameters:")
+print(f"  n_estimators:      100")
+print(f"  max_depth:         15")
+print(f"  min_samples_split: 50")
+print(f"  min_samples_leaf:  25")
+print(f"  max_features:      sqrt")
+print(f"\nTraining... (this may take several minutes on {len(X_train):,} patients)")
+
+rsf_model.fit(X_train, y_train_surv)
+print("✓ Training complete!")
+
+# ============================================================
+# STEP 12: EVALUATE MODEL - CONCORDANCE INDEX
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 12: EVALUATING MODEL PERFORMANCE")
+print("="*60)
+
+def predict_in_batches(model, X, batch_size=5000):
+    """Predict risk scores in batches to avoid memory errors."""
+    scores = []
+    n = len(X)
+    for start in range(0, n, batch_size):
+        end = min(start + batch_size, n)
+        scores.append(model.predict(X.iloc[start:end]))
+        if (start // batch_size) % 5 == 0:
+            print(f"    Predicted {end:,} / {n:,} patients...")
+    return np.concatenate(scores)
+
+# Use a subsample for C-index — O(n²) makes full dataset infeasible
+CINDEX_SAMPLE = 10000
+np.random.seed(31)
+
+print(f"Sampling {CINDEX_SAMPLE:,} patients for C-index (full dataset is O(n²) — not feasible)...")
+
+# Sample train
+train_sample_idx = np.random.choice(len(X_train), size=CINDEX_SAMPLE, replace=False)
+X_train_sample        = X_train.iloc[train_sample_idx]
+y_train_time_sample   = y_train_time[train_sample_idx]
+y_train_event_sample  = y_train_event[train_sample_idx]
+train_scores_sample   = predict_in_batches(rsf_model, X_train_sample, batch_size=5000)
+
+# Sample test
+test_sample_idx = np.random.choice(len(X_test), size=CINDEX_SAMPLE, replace=False)
+X_test_sample        = X_test.iloc[test_sample_idx]
+y_test_time_sample   = y_test_time[test_sample_idx]
+y_test_event_sample  = y_test_event[test_sample_idx]
+test_scores_sample   = predict_in_batches(rsf_model, X_test_sample, batch_size=5000)
+
+# C-index on samples
+train_cindex = concordance_index_censored(
+    y_train_event_sample.astype(bool), y_train_time_sample, train_scores_sample
+)[0]
+test_cindex = concordance_index_censored(
+    y_test_event_sample.astype(bool), y_test_time_sample, test_scores_sample
+)[0]
+
+print(f"\n📊 Concordance Index (C-index) on {CINDEX_SAMPLE:,}-patient samples:")
+print(f"  Train C-index: {train_cindex:.4f}")
+print(f"  Test  C-index: {test_cindex:.4f}")
+print(f"  (Random baseline: 0.5000)")
+
+if test_cindex >= 0.70:
+    print(f"  ✓ Good discrimination (C-index ≥ 0.70)")
+elif test_cindex >= 0.60:
+    print(f"  ⚠️ Moderate discrimination (0.60–0.70)")
+else:
+    print(f"  ❌ Poor discrimination (< 0.60)")
+
+# Also store the full test scores for visualizations downstream
+print(f"\nGenerating full test risk scores for visualizations (batched)...")
+test_risk_scores  = predict_in_batches(rsf_model, X_test,  batch_size=5000)
+train_risk_scores = train_scores_sample  # Only needed for C-index, sample is fine
+median_risk = np.median(test_risk_scores)
+
+# ============================================================
+# STEP 13: VISUALIZATIONS
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 13: CREATING VISUALIZATIONS")
+print("="*60)
+
+# --- Plot 1: Risk Score Distribution by Event Status ---
+plt.figure(figsize=(10, 6))
+plt.hist(test_risk_scores[y_test_event], bins=50, alpha=0.6,
+         label='Died of Lung Cancer', color='red', edgecolor='black', density=True)
+plt.hist(test_risk_scores[~y_test_event], bins=50, alpha=0.6,
+         label='Censored (survived/other COD)', color='blue', edgecolor='black', density=True)
+plt.xlabel('RSF Risk Score (higher = worse prognosis)', fontsize=12)
+plt.ylabel('Density', fontsize=12)
+plt.title(f'Risk Score Distribution by Outcome\nTest C-index = {test_cindex:.4f}', fontsize=14, fontweight='bold')
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('rsf_risk_score_distribution.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✓ Saved: rsf_risk_score_distribution.png")
+
+# --- Plot 2: Risk Score vs Actual Survival Time ---
+plt.figure(figsize=(10, 6))
+scatter = plt.scatter(
+    y_test_time,
+    test_risk_scores,
+    c=y_test_event.astype(int),
+    cmap='RdYlGn_r',
+    alpha=0.3, s=5
+)
+plt.colorbar(scatter, label='Event (1=died of LC, 0=censored)')
+plt.xlabel('Actual Survival Months', fontsize=12)
+plt.ylabel('RSF Risk Score', fontsize=12)
+plt.title('Risk Score vs Actual Survival Time\n(Higher risk score should correlate with shorter survival)',
+          fontsize=13, fontweight='bold')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('rsf_risk_vs_survival.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✓ Saved: rsf_risk_vs_survival.png")
+
+# --- Plot 3: Survival Curves for High/Low Risk Groups ---
+print("\nGenerating survival curves for risk quartiles...")
+
+# Split test set into high/low risk by median score
+median_risk = np.median(test_risk_scores)
+high_risk_idx = np.where(test_risk_scores > median_risk)[0]
+low_risk_idx  = np.where(test_risk_scores <= median_risk)[0]
+
+# Predict survival functions for a sample of each group (memory-safe)
+sample_size = min(100, len(high_risk_idx), len(low_risk_idx))
+np.random.seed(31)
+high_sample = np.random.choice(high_risk_idx, sample_size, replace=False)
+low_sample  = np.random.choice(low_risk_idx,  sample_size, replace=False)
+
+surv_funcs_high = rsf_model.predict_survival_function(X_test.iloc[high_sample])
+surv_funcs_low  = rsf_model.predict_survival_function(X_test.iloc[low_sample])
+
+plt.figure(figsize=(10, 6))
+
+# Average survival curve for each group
+time_points = surv_funcs_high[0].x
+avg_high = np.mean([fn(time_points) for fn in surv_funcs_high], axis=0)
+avg_low  = np.mean([fn(time_points) for fn in surv_funcs_low],  axis=0)
+
+plt.plot(time_points, avg_high, color='red',  linewidth=2, label='High Risk (above median score)')
+plt.plot(time_points, avg_low,  color='green', linewidth=2, label='Low Risk (below median score)')
+plt.fill_between(time_points,
+                 np.percentile([fn(time_points) for fn in surv_funcs_high], 25, axis=0),
+                 np.percentile([fn(time_points) for fn in surv_funcs_high], 75, axis=0),
+                 alpha=0.2, color='red')
+plt.fill_between(time_points,
+                 np.percentile([fn(time_points) for fn in surv_funcs_low], 25, axis=0),
+                 np.percentile([fn(time_points) for fn in surv_funcs_low], 75, axis=0),
+                 alpha=0.2, color='green')
+
+plt.xlabel('Months', fontsize=12)
+plt.ylabel('Survival Probability', fontsize=12)
+plt.title('Average Survival Curves: High vs Low Risk Groups\n(Shaded = IQR across 100 sampled patients per group)',
+          fontsize=13, fontweight='bold')
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.ylim(0, 1)
+plt.tight_layout()
+plt.savefig('rsf_survival_curves.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✓ Saved: rsf_survival_curves.png")
+
+# ============================================================
+# STEP 14: FEATURE IMPORTANCE (PERMUTATION)
+# ============================================================
+# RandomSurvivalForest does not support .feature_importances_
+# Permutation importance is used instead: measures drop in C-index
+# when each feature is randomly shuffled.
+# Run on a subsample to avoid memory allocation errors.
+
+print("\n" + "="*60)
+print("STEP 14: FEATURE IMPORTANCE (PERMUTATION)")
+print("="*60)
+
+PERM_SAMPLE = 5000  # Safe subsample size for permutation
+np.random.seed(31)
+perm_idx = np.random.choice(len(X_test), size=min(PERM_SAMPLE, len(X_test)), replace=False)
+
+X_test_sample      = X_test.iloc[perm_idx]
+y_test_surv_sample = y_test_surv[perm_idx]
+
+print(f"Running permutation importance on {len(X_test_sample):,} sampled patients...")
+print("(n_repeats=5 — may take a few minutes)")
+
+perm_result = permutation_importance(
+    rsf_model,
+    X_test_sample,
+    y_test_surv_sample,
+    n_repeats=5,
+    random_state=31,
+    n_jobs=1          # n_jobs=1 avoids the parallel memory error seen previously
+)
+
+feature_importance_df = pd.DataFrame({
+    'Feature':    feature_columns,
+    'Importance': perm_result.importances_mean,
+    'Std':        perm_result.importances_std
+}).sort_values('Importance', ascending=False)
+
+print("\n📊 Feature Importance (mean decrease in C-index when shuffled):")
+print(f"{'Rank':<5} {'Feature':<65} {'Importance':>12} {'Std':>8}")
+print("-"*92)
+for rank, (_, row) in enumerate(feature_importance_df.iterrows(), 1):
+    print(f"  {rank:<3}  {row['Feature']:<65} {row['Importance']:>10.4f}  ±{row['Std']:.4f}")
+
+# Plot feature importances
+plt.figure(figsize=(10, 7))
+colors = ['steelblue' if v >= 0 else 'salmon' for v in feature_importance_df['Importance']]
+plt.barh(
+    feature_importance_df['Feature'][::-1],
+    feature_importance_df['Importance'][::-1],
+    xerr=feature_importance_df['Std'][::-1],
+    color=colors[::-1],
+    alpha=0.8,
+    capsize=4
+)
+plt.axvline(x=0, color='black', linewidth=0.8, linestyle='--')
+plt.xlabel('Mean Decrease in C-index (shuffled vs baseline)', fontsize=12)
+plt.title('RSF Feature Importance (Permutation)\nBlue = positive contribution, Red = negative/noise',
+          fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.savefig('rsf_feature_importance.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("\n✓ Saved: rsf_feature_importance.png")
+
+# ============================================================
+# STEP 15: SAVE RESULTS
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 15: SAVING RESULTS")
+print("="*60)
+
+# Save model
+with open('lung_cancer_rsf_model.pkl', 'wb') as f:
+    pickle.dump(rsf_model, f)
+print("✓ Model saved: lung_cancer_rsf_model.pkl")
+
+# Save feature importance
+feature_importance_df.to_csv('rsf_feature_importance.csv', index=False)
+print("✓ Feature importance saved: rsf_feature_importance.csv")
+
+# Save predictions
+results_df = pd.DataFrame({
+    'Actual_Survival_Months': y_test_time,
+    'Event_Occurred':         y_test_event,
+    'RSF_Risk_Score':         test_risk_scores,
+    'Risk_Group':             np.where(test_risk_scores > median_risk, 'High', 'Low')
+})
+results_df.to_csv('rsf_predictions.csv', index=False)
+print("✓ Predictions saved: rsf_predictions.csv")
+
+# ============================================================
+# FINAL SUMMARY
+# ============================================================
+
+print("\n" + "="*60)
+print("🎉 RANDOM SURVIVAL FOREST ANALYSIS COMPLETE!")
+print("="*60)
+
+print(f"\n📊 Dataset:")
+print(f"  Total patients:    {len(df):>10,}")
+print(f"  Training set:      {len(X_train):>10,}")
+print(f"  Test set:          {len(X_test):>10,}")
+print(f"  Events (LC death): {int(y_event.sum()):>10,} ({y_event.mean()*100:.1f}%)")
+print(f"  Censored:          {int((~y_event).sum()):>10,} ({(~y_event).mean()*100:.1f}%)")
+
+print(f"\n📊 Model Performance:")
+print(f"  Train C-index:     {train_cindex:.4f}")
+print(f"  Test  C-index:     {test_cindex:.4f}")
+print(f"  (Random baseline:  0.5000)")
+
+print(f"\n📁 Files Created:")
+print(f"  1. lung_cancer_rsf_model.pkl         - Trained RSF model")
+print(f"  2. rsf_predictions.csv               - Risk scores per patient")
+print(f"  3. rsf_feature_importance.csv        - Permutation importances")
+print(f"  4. rsf_risk_score_distribution.png   - Score dist by outcome")
+print(f"  5. rsf_risk_vs_survival.png          - Score vs actual time")
+print(f"  6. rsf_survival_curves.png           - High vs low risk curves")
+print(f"  7. rsf_feature_importance.png        - Importance bar chart")
+
+print(f"\n💡 Key Notes:")
+print(f"  • C-index measures ranking accuracy, not prediction of exact months")
+print(f"  • RSF risk scores: higher score = higher risk of earlier death")
+print(f"  • Permutation importance run on {len(X_test_sample):,}-patient subsample to manage memory")
+
+print("\n" + "="*60)
