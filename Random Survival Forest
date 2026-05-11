@@ -574,6 +574,136 @@ results_df.to_csv('rsf_predictions.csv', index=False)
 print("✓ Predictions saved: rsf_predictions.csv")
 
 # ============================================================
+# STEP 16: RISK QUARTILE ANALYSIS
+# ============================================================
+# Bins patients into risk quartiles and computes actual survival
+# statistics per quartile — translates abstract risk scores into
+# clinically interpretable survival windows.
+
+print("\n" + "="*60)
+print("STEP 16: RISK QUARTILE ANALYSIS")
+print("="*60)
+
+# Build a dataframe with full test set results
+quartile_df = pd.DataFrame({
+    'Actual_Survival_Months': y_test_time,
+    'Event_Occurred':         y_test_event,
+    'RSF_Risk_Score':         test_risk_scores,
+})
+
+# Assign quartiles based on risk score (Q1=lowest risk, Q4=highest)
+quartile_df['Risk_Quartile'] = pd.qcut(
+    quartile_df['RSF_Risk_Score'],
+    q=4,
+    labels=['Q1 (Lowest Risk)', 'Q2', 'Q3', 'Q4 (Highest Risk)']
+)
+
+print("\n📊 Survival Statistics by Risk Quartile:")
+print(f"{'Quartile':<22} {'N':>7} {'Event%':>8} {'Median Survival':>17} {'Mean Survival':>15} {'P25':>8} {'P75':>8}")
+print("-" * 90)
+
+quartile_summary = []
+for quartile in ['Q1 (Lowest Risk)', 'Q2', 'Q3', 'Q4 (Highest Risk)']:
+    grp = quartile_df[quartile_df['Risk_Quartile'] == quartile]
+    n             = len(grp)
+    event_pct     = grp['Event_Occurred'].mean() * 100
+    median_surv   = grp['Actual_Survival_Months'].median()
+    mean_surv     = grp['Actual_Survival_Months'].mean()
+    p25           = grp['Actual_Survival_Months'].quantile(0.25)
+    p75           = grp['Actual_Survival_Months'].quantile(0.75)
+    score_median  = grp['RSF_Risk_Score'].median()
+    score_min     = grp['RSF_Risk_Score'].min()
+    score_max     = grp['RSF_Risk_Score'].max()
+
+    print(f"{quartile:<22} {n:>7,} {event_pct:>7.1f}% {median_surv:>14.1f}mo {mean_surv:>13.1f}mo {p25:>7.1f}mo {p75:>7.1f}mo")
+
+    quartile_summary.append({
+        'Risk_Quartile':          quartile,
+        'N':                      n,
+        'Event_Pct':              round(event_pct, 1),
+        'Score_Min':              round(score_min, 2),
+        'Score_Median':           round(score_median, 2),
+        'Score_Max':              round(score_max, 2),
+        'Median_Survival_Months': round(median_surv, 1),
+        'Mean_Survival_Months':   round(mean_surv, 1),
+        'P25_Survival_Months':    round(p25, 1),
+        'P75_Survival_Months':    round(p75, 1),
+    })
+
+quartile_summary_df = pd.DataFrame(quartile_summary)
+
+print(f"\n📊 Risk Score Ranges per Quartile:")
+print(f"{'Quartile':<22} {'Score Min':>12} {'Score Median':>14} {'Score Max':>12}")
+print("-" * 62)
+for _, row in quartile_summary_df.iterrows():
+    print(f"{row['Risk_Quartile']:<22} {row['Score_Min']:>12.2f} {row['Score_Median']:>14.2f} {row['Score_Max']:>12.2f}")
+
+# --- Visualization: Median Survival by Quartile (bar chart) ---
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+colors = ['#2ecc71', '#f39c12', '#e67e22', '#e74c3c']
+quartile_labels = [q.replace(' (Lowest Risk)', '\n(Lowest Risk)').replace(' (Highest Risk)', '\n(Highest Risk)')
+                   for q in quartile_summary_df['Risk_Quartile']]
+
+# Bar chart: median survival
+axes[0].bar(quartile_labels,
+            quartile_summary_df['Median_Survival_Months'],
+            color=colors, edgecolor='black', alpha=0.85)
+axes[0].errorbar(
+    quartile_labels,
+    quartile_summary_df['Median_Survival_Months'],
+    yerr=[
+        quartile_summary_df['Median_Survival_Months'] - quartile_summary_df['P25_Survival_Months'],
+        quartile_summary_df['P75_Survival_Months']    - quartile_summary_df['Median_Survival_Months']
+    ],
+    fmt='none', color='black', capsize=6, linewidth=1.5
+)
+axes[0].set_xlabel('Risk Quartile', fontsize=12)
+axes[0].set_ylabel('Survival Months', fontsize=12)
+axes[0].set_title('Median Survival by Risk Quartile\n(Error bars = IQR)', fontsize=13, fontweight='bold')
+axes[0].grid(True, alpha=0.3, axis='y')
+for i, row in quartile_summary_df.iterrows():
+    axes[0].text(i, row['Median_Survival_Months'] + 1.5,
+                 f"{row['Median_Survival_Months']:.0f}mo",
+                 ha='center', fontsize=11, fontweight='bold')
+
+# Bar chart: event rate
+axes[1].bar(quartile_labels,
+            quartile_summary_df['Event_Pct'],
+            color=colors, edgecolor='black', alpha=0.85)
+axes[1].axhline(y=quartile_df['Event_Occurred'].mean() * 100,
+                color='navy', linestyle='--', linewidth=1.5,
+                label=f"Overall event rate ({quartile_df['Event_Occurred'].mean()*100:.1f}%)")
+axes[1].set_xlabel('Risk Quartile', fontsize=12)
+axes[1].set_ylabel('% Died of Lung Cancer', fontsize=12)
+axes[1].set_title('Lung Cancer Death Rate by Risk Quartile', fontsize=13, fontweight='bold')
+axes[1].set_ylim(0, 105)
+axes[1].legend(fontsize=10)
+axes[1].grid(True, alpha=0.3, axis='y')
+for i, row in quartile_summary_df.iterrows():
+    axes[1].text(i, row['Event_Pct'] + 1.5,
+                 f"{row['Event_Pct']:.1f}%",
+                 ha='center', fontsize=11, fontweight='bold')
+
+plt.tight_layout()
+plt.savefig('rsf_quartile_analysis.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("\n✓ Saved: rsf_quartile_analysis.png")
+
+# Save quartile summary
+quartile_summary_df.to_csv('rsf_quartile_summary.csv', index=False)
+print("✓ Saved: rsf_quartile_summary.csv")
+
+print(f"""
+💡 How to interpret the quartile table:
+   • Q1 (Lowest Risk): patients the model is most confident will survive longer
+   • Q4 (Highest Risk): patients the model flags as highest mortality risk
+   • Median survival gap between Q1 and Q4 = model's practical clinical range
+   • Event% rising from Q1→Q4 confirms the risk score is well-calibrated
+   • IQR (P25–P75) shows how much individual variation exists within each group
+""")
+
+# ============================================================
 # FINAL SUMMARY
 # ============================================================
 
