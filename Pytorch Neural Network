@@ -1,0 +1,839 @@
+# ============================================================
+# LUNG CANCER SURVIVAL PREDICTION - PYTORCH NEURAL NETWORK
+# WITH LOG TRANSFORMATION + RSF IMPORTANCE WEIGHTING
+# v3 fixes:
+#   - Median imputation restored (Step 8) — too many rows lost by dropping
+#   - Importance weighting applied to NN inputs only (not RSF)
+#   - RSF uses clean unweighted features to avoid distance distortion
+#   - feature_importances_ replaced with permutation importance
+#   - NN architecture restored to original deeper design
+#   - Importance scaling capped to prevent gradient collapse
+# ============================================================
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import torch
+import torch.nn as nn
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# ============================================================
+# STEP 1: LOAD DATA
+# ============================================================
+
+print("="*60)
+print("STEP 1: LOADING DATA")
+print("="*60)
+
+df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER_SQL_Output.csv",
+                 low_memory=False)
+
+print(f"Original dataset size: {len(df)} patients")
+print(f"Number of columns: {len(df.columns)}")
+
+# ============================================================
+# STEP 2: REMOVE DUPLICATES
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 2: REMOVING DUPLICATES")
+print("="*60)
+
+df = df.drop_duplicates()
+print(f"After removing duplicates: {len(df)} patients")
+
+# ============================================================
+# STEP 3: EXTRACT TARGET VARIABLE (SURVIVAL MONTHS)
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 3: EXTRACTING TARGET VARIABLE")
+print("="*60)
+
+df['Survival_Months_Numeric'] = df['Survival months with NULL'].copy()
+
+print(f"Survival Months Statistics (BEFORE cleaning):")
+print(f"  Count: {df['Survival_Months_Numeric'].notna().sum()}")
+print(f"  Mean: {df['Survival_Months_Numeric'].mean():.2f}")
+print(f"  Median: {df['Survival_Months_Numeric'].median():.2f}")
+print(f"  Min: {df['Survival_Months_Numeric'].min():.0f}")
+print(f"  Max: {df['Survival_Months_Numeric'].max():.0f}")
+
+df = df[df['Survival_Months_Numeric'].notna()].copy()
+print(f"\nAfter dropping missing target: {len(df)} patients")
+
+# ============================================================
+# STEP 4: FEATURE ENGINEERING - AGE
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 4: FEATURE ENGINEERING - AGE")
+print("="*60)
+
+def extract_age_mean(age_str):
+    if pd.isna(age_str):
+        return np.nan
+    age_str = str(age_str).strip()
+    if '90+' in age_str or '90 years' in age_str:
+        return 92
+    if '<1' in age_str or '00 years' in age_str:
+        return 0.5
+    try:
+        import re
+        numbers = re.findall(r'\d+', age_str)
+        if len(numbers) == 0:
+            return np.nan
+        elif len(numbers) == 1:
+            return float(numbers[0])
+        else:
+            return np.mean([float(n) for n in numbers])
+    except:
+        return np.nan
+
+df['Age_Mean'] = df['Age recode with <1 year olds and 90+'].apply(extract_age_mean)
+print(f"Age_Mean created: {df['Age_Mean'].notna().sum()} non-null values")
+
+# ============================================================
+# STEP 5: FEATURE ENGINEERING - TUMOR SIZE
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 5: FEATURE ENGINEERING - TUMOR SIZE")
+print("="*60)
+
+def extract_tumor_size(size_str):
+    if pd.isna(size_str) or 'Unknown' in str(size_str) or 'NULL' in str(size_str):
+        return np.nan
+    try:
+        import re
+        numbers = re.findall(r'\d+', str(size_str))
+        if numbers:
+            return float(numbers[0])
+        return np.nan
+    except:
+        return np.nan
+
+df['Tumor_Size_mm'] = df['Tumor Size Over Time Recode (1988+) with NULL'].apply(extract_tumor_size)
+print(f"Tumor_Size_mm created: {df['Tumor_Size_mm'].notna().sum()} non-null values")
+
+# ============================================================
+# STEP 6: FEATURE ENGINEERING - TREATMENT DAYS
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 6: FEATURE ENGINEERING - TREATMENT DAYS")
+print("="*60)
+
+def extract_treatment_days(days_str):
+    if pd.isna(days_str) or 'NULL' in str(days_str) or 'Unknown' in str(days_str):
+        return np.nan
+    try:
+        import re
+        numbers = re.findall(r'\d+', str(days_str))
+        if numbers:
+            return int(numbers[0])
+        return np.nan
+    except:
+        return np.nan
+
+df['Treatment_Days'] = df['Time from diagnosis to treatment in days recode with NULL'].apply(extract_treatment_days)
+print(f"Treatment_Days created: {df['Treatment_Days'].notna().sum()} non-null values")
+
+# ============================================================
+# STEP 7: ENCODE CATEGORICAL VARIABLES
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 7: ENCODING CATEGORICAL VARIABLES")
+print("="*60)
+
+categorical_cols = [
+    'Sex',
+    'Marital status at diagnosis',
+    'SEER historic stage A (1973-2015)',
+    'Derived Summary Grade 2018 (2018+) with NULL',
+    'RX Summ--Surg Prim Site (1998+)',
+    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)'
+]
+
+for col in categorical_cols:
+    if col in df.columns:
+        df.loc[:, col] = df[col].fillna('Unknown')
+        le = LabelEncoder()
+        df[col + '_Encoded'] = le.fit_transform(df[col].astype(str))
+        print(f"  Encoded {col}: {df[col].nunique()} unique values")
+
+# ============================================================
+# STEP 8: FILL MISSING NUMERIC VALUES WITH MEDIAN
+# ============================================================
+# Reverted from row-dropping (v2) — dropping removed 45% of patients,
+# which is too large a loss given that missingness is largely in
+# Tumor_Size_mm and Treatment_Days, not random.
+
+print("\n" + "="*60)
+print("STEP 8: FILLING MISSING VALUES WITH MEDIAN")
+print("="*60)
+
+numeric_features = ['Age_Mean', 'Tumor_Size_mm', 'Treatment_Days']
+
+for col in numeric_features:
+    median_val = df[col].median()
+    missing_count = df[col].isna().sum()
+    df.loc[:, col] = df[col].fillna(median_val)
+    print(f"  Filled {missing_count} missing values in {col} with median: {median_val:.2f}")
+
+# ============================================================
+# STEP 9: STANDARDIZE NUMERIC FEATURES
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 9: STANDARDIZING NUMERIC FEATURES")
+print("="*60)
+
+scaler = StandardScaler()
+
+df[['Age_Mean']] = scaler.fit_transform(df[['Age_Mean']])
+df[['Tumor_Size_mm']] = scaler.fit_transform(df[['Tumor_Size_mm']])
+df[['Treatment_Days']] = scaler.fit_transform(df[['Treatment_Days']])
+
+print("  Age_Mean, Tumor_Size_mm, Treatment_Days standardized (mean=0, std=1)")
+
+# ============================================================
+# STEP 10: SAVE PATIENT IDs
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 10: SAVING PATIENT IDs")
+print("="*60)
+
+patient_ids = df['Patient ID'].copy()
+print(f"  Patient IDs saved: {len(patient_ids)}")
+
+# ============================================================
+# STEP 11: LOG TRANSFORM TARGET VARIABLE
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 11: LOG TRANSFORMING TARGET VARIABLE")
+print("="*60)
+
+df['Survival_Months_Original'] = df['Survival_Months_Numeric'].copy()
+df['Survival_Months_Log'] = np.log1p(df['Survival_Months_Numeric'])
+
+print(f"Original Survival:")
+print(f"  Mean: {df['Survival_Months_Original'].mean():.2f} months")
+print(f"  Median: {df['Survival_Months_Original'].median():.2f} months")
+print(f"  Std: {df['Survival_Months_Original'].std():.2f} months")
+print(f"  Skewness: {df['Survival_Months_Original'].skew():.2f}")
+
+print(f"\nLog-Transformed Survival:")
+print(f"  Mean: {df['Survival_Months_Log'].mean():.3f}")
+print(f"  Median: {df['Survival_Months_Log'].median():.3f}")
+print(f"  Std: {df['Survival_Months_Log'].std():.3f}")
+print(f"  Skewness: {df['Survival_Months_Log'].skew():.2f}")
+
+plt.figure(figsize=(14, 5))
+
+plt.subplot(1, 2, 1)
+plt.hist(df['Survival_Months_Original'], bins=100, color='blue', alpha=0.7, edgecolor='black')
+plt.xlabel('Survival Months (Original)', fontsize=12)
+plt.ylabel('Frequency', fontsize=12)
+plt.title(f'Original Distribution\nSkewness = {df["Survival_Months_Original"].skew():.2f}', fontsize=14, fontweight='bold')
+plt.axvline(df['Survival_Months_Original'].mean(), color='red', linestyle='--', linewidth=2, label=f'Mean = {df["Survival_Months_Original"].mean():.1f}')
+plt.axvline(df['Survival_Months_Original'].median(), color='orange', linestyle='--', linewidth=2, label=f'Median = {df["Survival_Months_Original"].median():.1f}')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.subplot(1, 2, 2)
+plt.hist(df['Survival_Months_Log'], bins=100, color='green', alpha=0.7, edgecolor='black')
+plt.xlabel('Survival Months (Log Transformed)', fontsize=12)
+plt.ylabel('Frequency', fontsize=12)
+plt.title(f'Log-Transformed Distribution\nSkewness = {df["Survival_Months_Log"].skew():.2f}', fontsize=14, fontweight='bold')
+plt.axvline(df['Survival_Months_Log'].mean(), color='red', linestyle='--', linewidth=2, label=f'Mean = {df["Survival_Months_Log"].mean():.2f}')
+plt.axvline(df['Survival_Months_Log'].median(), color='orange', linestyle='--', linewidth=2, label=f'Median = {df["Survival_Months_Log"].median():.2f}')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('log_transformation_comparison.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("\n✓ Saved: log_transformation_comparison.png")
+
+# ============================================================
+# STEP 12: SELECT FEATURES AND TARGETS
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 12: SELECTING FEATURES AND TARGETS")
+print("="*60)
+
+feature_columns = [
+    'Age_Mean',
+    'Tumor_Size_mm',
+    'Treatment_Days',
+    'Year of diagnosis',
+    'Sex_Encoded',
+    'Marital status at diagnosis_Encoded',
+    'SEER historic stage A (1973-2015)_Encoded',
+    'Derived Summary Grade 2018 (2018+) with NULL_Encoded',
+    'RX Summ--Surg Prim Site (1998+)_Encoded',
+    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded'
+]
+
+X = df[feature_columns].copy()
+y_log = df['Survival_Months_Log'].copy()
+y_original = df['Survival_Months_Original'].copy()
+
+print(f"Features (X): {X.shape[0]} patients, {X.shape[1]} features")
+missing = X.isnull().sum()
+print(f"\nMissing values in features:")
+if missing.sum() > 0:
+    print(missing[missing > 0])
+else:
+    print("  None - All features are complete!")
+
+# ============================================================
+# STEP 12b: APPLY RSF IMPORTANCE WEIGHTS TO NN INPUT FEATURES
+# ============================================================
+# IMPORTANT: This weighted copy (X_nn) is used ONLY for the neural
+# network. The RSF receives the original unweighted X to avoid
+# distorting its internal distance/splitting calculations.
+#
+# Weights are scaled relative to the mean importance (mean = 1.0),
+# so important features are amplified while low-importance features
+# are reduced modestly rather than being crushed toward zero.
+#
+# An additional sqrt() cap is applied to prevent Year of diagnosis
+# (5.27x) from dominating so heavily that gradients collapse.
+
+print("\n" + "="*60)
+print("STEP 12b: APPLYING RSF IMPORTANCE WEIGHTS TO NN FEATURES")
+print("="*60)
+
+rsf_importance_raw = {
+    'Year of diagnosis':                                                    0.540,
+    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded':   0.310,
+    'RX Summ--Surg Prim Site (1998+)_Encoded':                             0.080,
+    'SEER historic stage A (1973-2015)_Encoded':                           0.030,
+    'Treatment_Days':                                                       0.020,
+    'Derived Summary Grade 2018 (2018+) with NULL_Encoded':                0.015,
+    'Age_Mean':                                                             0.013,
+    'Tumor_Size_mm':                                                        0.012,
+    'Sex_Encoded':                                                          0.003,
+    'Marital status at diagnosis_Encoded':                                  0.002,
+}
+
+# Scale relative to mean, then apply sqrt to compress extreme values
+mean_importance = sum(rsf_importance_raw.values()) / len(rsf_importance_raw)
+rsf_importance_scaled = {
+    k: np.sqrt(v / mean_importance)
+    for k, v in rsf_importance_raw.items()
+}
+
+print("  Sqrt-scaled importance weights (sqrt of mean-relative score):")
+for feat, weight in sorted(rsf_importance_scaled.items(), key=lambda x: -x[1]):
+    print(f"    {feat:<65s} {weight:.4f}")
+
+# Cast to float64, then apply weights — NN only
+X_nn = X.copy().astype(np.float64)
+for col in feature_columns:
+    weight = rsf_importance_scaled.get(col, 1.0)
+    X_nn.loc[:, col] = X_nn[col] * weight
+
+print(f"\n  ✓ Weighted feature matrix (X_nn) created for neural network")
+print(f"  ✓ Original feature matrix (X) preserved for Random Survival Forest")
+
+# ============================================================
+# STEP 13: TRAIN-TEST SPLIT
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 13: TRAIN-TEST SPLIT")
+print("="*60)
+
+# Split both weighted (NN) and unweighted (RSF) feature matrices
+# using the same random_state so train/test sets are identical
+(X_nn_train, X_nn_test,
+ X_rsf_train, X_rsf_test,
+ y_train_log, y_test_log,
+ y_train_orig, y_test_orig) = train_test_split(
+    X_nn, X, y_log, y_original,
+    test_size=0.2,
+    random_state=31
+)
+
+_, patient_ids_test, _, _ = train_test_split(
+    patient_ids, y_log,
+    test_size=0.2,
+    random_state=31
+)
+
+print(f"Training set: {len(X_nn_train)} patients ({len(X_nn_train)/len(X)*100:.1f}%)")
+print(f"Test set: {len(X_nn_test)} patients ({len(X_nn_test)/len(X)*100:.1f}%)")
+
+# ============================================================
+# STEP 14: CONVERT TO PYTORCH TENSORS
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 14: CONVERTING TO PYTORCH TENSORS")
+print("="*60)
+
+features_np      = X_nn_train.values.astype(np.float32)
+target_np        = y_train_log.values.astype(np.float32).reshape(-1, 1)
+features_tensor  = torch.from_numpy(features_np).float()
+target_tensor    = torch.from_numpy(target_np).float()
+
+test_features_np     = X_nn_test.values.astype(np.float32)
+test_target_np       = y_test_log.values.astype(np.float32).reshape(-1, 1)
+test_tensor          = torch.from_numpy(test_features_np).float()
+test_target_tensor   = torch.from_numpy(test_target_np).float()
+
+input_size = features_tensor.shape[1]
+
+print(f"Features tensor shape: {features_tensor.shape}")
+print(f"Target tensor shape: {target_tensor.shape}")
+print(f"Input size for neural network: {input_size} features")
+
+# ============================================================
+# STEP 15: BUILD NEURAL NETWORK MODEL
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 15: BUILDING NEURAL NETWORK")
+print("="*60)
+
+survival_model = nn.Sequential(
+    nn.Linear(input_size, 128),
+    nn.BatchNorm1d(128),
+    nn.ReLU(),
+    nn.Dropout(0.3),
+
+    nn.Linear(128, 64),
+    nn.BatchNorm1d(64),
+    nn.ReLU(),
+    nn.Dropout(0.3),
+
+    nn.Linear(64, 32),
+    nn.BatchNorm1d(32),
+    nn.ReLU(),
+    nn.Dropout(0.2),
+
+    nn.Linear(32, 16),
+    nn.ReLU(),
+
+    nn.Linear(16, 1)
+)
+
+print("Neural Network Architecture:")
+print(survival_model)
+print(f"\nTotal parameters: {sum(p.numel() for p in survival_model.parameters()):,}")
+
+# ============================================================
+# STEP 16: DEFINE LOSS FUNCTION AND OPTIMIZER
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 16: DEFINING LOSS AND OPTIMIZER")
+print("="*60)
+
+criterion  = nn.HuberLoss(delta=1.0)
+optimizer  = torch.optim.Adam(survival_model.parameters(), lr=0.001)
+scheduler  = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='min', patience=20, factor=0.5
+)
+
+print("Loss function: HuberLoss (delta=1.0)")
+print("Optimizer: Adam (lr=0.001)")
+print("Scheduler: ReduceLROnPlateau (patience=20, factor=0.5)")
+
+# ============================================================
+# STEP 17: TRAINING LOOP
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 17: TRAINING NEURAL NETWORK")
+print("="*60)
+
+num_epochs = 500
+print(f"Epochs: {num_epochs}\n")
+
+train_losses = []
+test_losses  = []
+
+for epoch in range(num_epochs):
+    survival_model.train()
+    predictions = survival_model(features_tensor)
+    loss = criterion(predictions, target_tensor)
+
+    if torch.isnan(loss):
+        print(f"\n❌ NaN detected at epoch {epoch+1}! Stopping.")
+        break
+
+    train_losses.append(loss.item())
+    optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(survival_model.parameters(), max_norm=1.0)
+    optimizer.step()
+
+    if (epoch + 1) % 50 == 0:
+        survival_model.eval()
+        with torch.no_grad():
+            test_pred = survival_model(test_tensor)
+            test_loss = criterion(test_pred, test_target_tensor)
+            test_losses.append(test_loss.item())
+        scheduler.step(test_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f'Epoch [{epoch+1}/{num_epochs}]  Train Loss: {loss.item():.6f}  '
+              f'Test Loss: {test_loss.item():.6f}  LR: {current_lr:.6f}')
+
+print("\n✓ Training complete!")
+
+# ============================================================
+# STEP 18: PLOT TRAINING LOSS
+# ============================================================
+
+plt.figure(figsize=(12, 5))
+
+plt.subplot(1, 2, 1)
+plt.plot(train_losses, color='blue', linewidth=1, alpha=0.7)
+plt.xlabel('Epoch', fontsize=12)
+plt.ylabel('Training Loss (Huber)', fontsize=12)
+plt.title('Training Loss Over Time', fontsize=14, fontweight='bold')
+plt.grid(True, alpha=0.3)
+
+plt.subplot(1, 2, 2)
+test_epochs = np.arange(50, len(test_losses)*50 + 1, 50)
+plt.plot(test_epochs, test_losses, color='red', marker='o', linewidth=2, markersize=3)
+plt.xlabel('Epoch', fontsize=12)
+plt.ylabel('Test Loss (Huber)', fontsize=12)
+plt.title('Test Loss Over Time', fontsize=14, fontweight='bold')
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.savefig('training_loss_curve_log.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✓ Saved: training_loss_curve_log.png")
+
+# ============================================================
+# STEP 19: MAKE PREDICTIONS (LOG SCALE)
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 19: MAKING PREDICTIONS")
+print("="*60)
+
+survival_model.eval()
+with torch.no_grad():
+    test_predictions_log  = survival_model(test_tensor).numpy().flatten()
+    train_predictions_log = survival_model(features_tensor).numpy().flatten()
+
+unique_log_preds = len(np.unique(np.round(test_predictions_log, 3)))
+print(f"  Unique log-scale predictions: {unique_log_preds}")
+if unique_log_preds < 10:
+    print("  ⚠️ Warning: Nearly constant predictions — model may not have converged")
+else:
+    print("  ✓ Predictions vary as expected")
+
+# ============================================================
+# STEP 20: TRANSFORM BACK TO ORIGINAL SCALE
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 20: TRANSFORMING BACK TO ORIGINAL SCALE")
+print("="*60)
+
+test_predictions  = np.expm1(test_predictions_log)
+train_predictions = np.expm1(train_predictions_log)
+
+print(f"Predicted survival (months): min={test_predictions.min():.2f}  "
+      f"max={test_predictions.max():.2f}  mean={test_predictions.mean():.2f}  "
+      f"median={np.median(test_predictions):.2f}")
+print(f"Actual survival (months):    min={y_test_orig.min():.2f}  "
+      f"max={y_test_orig.max():.2f}  mean={y_test_orig.mean():.2f}  "
+      f"median={y_test_orig.median():.2f}")
+
+# ============================================================
+# STEP 21: EVALUATE NEURAL NETWORK PERFORMANCE
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 21: EVALUATING NEURAL NETWORK PERFORMANCE")
+print("="*60)
+
+y_test  = y_test_orig.values
+y_train = y_train_orig.values
+
+test_rmse  = np.sqrt(mean_squared_error(y_test, test_predictions))
+test_mae   = mean_absolute_error(y_test, test_predictions)
+test_r2    = r2_score(y_test, test_predictions)
+train_rmse = np.sqrt(mean_squared_error(y_train, train_predictions))
+train_mae  = mean_absolute_error(y_train, train_predictions)
+train_r2   = r2_score(y_train, train_predictions)
+
+print(f"\n📊 Test Set:   RMSE={test_rmse:.2f}  MAE={test_mae:.2f}  R²={test_r2:.3f}")
+print(f"📊 Train Set:  RMSE={train_rmse:.2f}  MAE={train_mae:.2f}  R²={train_r2:.3f}")
+print(f"\n🔍 Overfitting (train R² - test R²): {train_r2 - test_r2:.3f}")
+
+if test_r2 > 0.3:
+    print(f"✓ Good: model explains {test_r2*100:.1f}% of variance")
+elif test_r2 > 0.1:
+    print(f"⚠️ Moderate: R²={test_r2:.3f}, room for improvement")
+else:
+    print(f"❌ Poor: R²={test_r2:.3f}")
+
+# ============================================================
+# STEPS 22-24: VISUALIZATIONS
+# ============================================================
+
+# Actual vs Predicted
+plt.figure(figsize=(10, 6))
+plt.scatter(y_test, test_predictions, alpha=0.3, s=10, color='steelblue', edgecolors='none')
+plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2, label='Perfect Prediction')
+plt.xlabel('Actual Survival Months', fontsize=13)
+plt.ylabel('Predicted Survival Months', fontsize=13)
+plt.title(f'Neural Network: Actual vs Predicted\nR²={test_r2:.3f}  RMSE={test_rmse:.2f} months', fontsize=14, fontweight='bold')
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('nn_actual_vs_predicted_log.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✓ Saved: nn_actual_vs_predicted_log.png")
+
+# Residuals
+residuals = y_test - test_predictions
+plt.figure(figsize=(10, 6))
+plt.scatter(test_predictions, residuals, alpha=0.3, s=10, color='coral', edgecolors='none')
+plt.axhline(y=0, color='red', linestyle='--', lw=2)
+plt.xlabel('Predicted Survival Months', fontsize=13)
+plt.ylabel('Residuals (Actual - Predicted)', fontsize=13)
+plt.title('Neural Network: Residual Plot', fontsize=14, fontweight='bold')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('nn_residuals_plot_log.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✓ Saved: nn_residuals_plot_log.png")
+
+# Distribution comparison
+plt.figure(figsize=(14, 5))
+plt.subplot(1, 2, 1)
+plt.hist(y_test, bins=50, alpha=0.7, label='Actual', color='blue', edgecolor='black')
+plt.xlabel('Survival Months', fontsize=12)
+plt.title('Actual Survival Distribution', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3, axis='y')
+
+plt.subplot(1, 2, 2)
+plt.hist(test_predictions, bins=50, alpha=0.7, label='Predicted', color='orange', edgecolor='black')
+plt.xlabel('Survival Months', fontsize=12)
+plt.title('Predicted Survival Distribution', fontsize=14, fontweight='bold')
+plt.legend()
+plt.grid(True, alpha=0.3, axis='y')
+
+plt.tight_layout()
+plt.savefig('nn_distributions_comparison_log.png', dpi=300, bbox_inches='tight')
+plt.close()
+print("✓ Saved: nn_distributions_comparison_log.png")
+
+# ============================================================
+# STEP 25: PREDICTIONS DATAFRAME
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 25: CREATING PREDICTIONS DATAFRAME")
+print("="*60)
+
+test_predictions_df = pd.DataFrame({
+    'Patient_ID':               patient_ids_test.values,
+    'Actual_Survival_Months':   y_test,
+    'Predicted_Survival_Months': test_predictions,
+    'Absolute_Error':           np.abs(y_test - test_predictions),
+    'Percentage_Error':         np.abs(y_test - test_predictions) / (y_test + 1) * 100
+})
+
+print(test_predictions_df.head(10).to_string(index=False))
+print(f"\n  MAE:  {test_predictions_df['Absolute_Error'].mean():.2f} months")
+print(f"  MdAE: {test_predictions_df['Absolute_Error'].median():.2f} months")
+print(f"  P75:  {test_predictions_df['Absolute_Error'].quantile(0.75):.2f} months")
+print(f"  P90:  {test_predictions_df['Absolute_Error'].quantile(0.90):.2f} months")
+print(f"  P95:  {test_predictions_df['Absolute_Error'].quantile(0.95):.2f} months")
+
+# ============================================================
+# STEP 26: SAVE NN RESULTS
+# ============================================================
+
+print("\n" + "="*60)
+print("STEP 26: SAVING NN RESULTS")
+print("="*60)
+
+torch.save(survival_model.state_dict(), 'lung_cancer_survival_nn_log.pth')
+test_predictions_df.to_csv('nn_lung_cancer_predictions_log.csv', index=False)
+print("✓ Model and predictions saved")
+
+# ============================================================
+# STEP 27: RANDOM SURVIVAL FOREST
+# ============================================================
+# Uses X_rsf_train / X_rsf_test — the UNWEIGHTED feature matrices.
+# This is critical: RSF splitting and distance calculations must not
+# be distorted by the importance scaling applied to the NN inputs.
+#
+# feature_importances_ is not implemented in sksurv's RSF.
+# We use sklearn's permutation_importance instead, which measures
+# how much test performance drops when each feature is shuffled.
+
+print("\n" + "="*60)
+print("STEP 27: TRAINING RANDOM SURVIVAL FOREST")
+print("="*60)
+
+try:
+    from sksurv.ensemble import RandomSurvivalForest
+    from sksurv.util import Surv
+    from sklearn.inspection import permutation_importance
+
+    print("📦 scikit-survival detected!")
+
+    y_train_surv = Surv.from_arrays(
+        event=np.ones(len(y_train_orig), dtype=bool),
+        time=y_train_orig.values
+    )
+    y_test_surv = Surv.from_arrays(
+        event=np.ones(len(y_test_orig), dtype=bool),
+        time=y_test_orig.values
+    )
+
+    print(f"  Training samples: {len(y_train_surv)}")
+    print(f"  Test samples:     {len(y_test_surv)}")
+    print("\n🌲 Training Random Survival Forest (this may take a few minutes)...")
+
+    rsf_model = RandomSurvivalForest(
+        n_estimators=100,
+        max_depth=15,
+        min_samples_split=50,
+        min_samples_leaf=25,
+        n_jobs=-1,
+        random_state=31
+    )
+
+    # Train on UNWEIGHTED features
+    rsf_model.fit(X_rsf_train, y_train_surv)
+    print("✓ Random Survival Forest trained!")
+
+    # Predict on UNWEIGHTED test features
+    rsf_predictions = rsf_model.predict(X_rsf_test)
+
+    print(f"\n📊 RSF Predictions: min={rsf_predictions.min():.2f}  "
+          f"max={rsf_predictions.max():.2f}  mean={rsf_predictions.mean():.2f}  "
+          f"median={np.median(rsf_predictions):.2f}")
+
+    rsf_rmse = np.sqrt(mean_squared_error(y_test_orig, rsf_predictions))
+    rsf_mae  = mean_absolute_error(y_test_orig, rsf_predictions)
+    rsf_r2   = r2_score(y_test_orig, rsf_predictions)
+
+    print(f"\n📊 RSF Performance:  RMSE={rsf_rmse:.2f}  MAE={rsf_mae:.2f}  R²={rsf_r2:.3f}")
+
+    # ----------------------------------------------------------
+    # FEATURE IMPORTANCE via permutation (replaces feature_importances_)
+    # n_repeats=5 gives a stable estimate without being too slow
+    # ----------------------------------------------------------
+    print("\n📊 Computing permutation feature importances (n_repeats=5)...")
+    print("  (This may take a few additional minutes on 94k samples...)")
+
+    perm_result = permutation_importance(
+        rsf_model,
+        X_rsf_test,
+        y_test_surv,
+        n_repeats=5,
+        random_state=31,
+        n_jobs=-1
+    )
+
+    feature_importance_df = pd.DataFrame({
+        'Feature':    feature_columns,
+        'Importance': perm_result.importances_mean,
+        'Std':        perm_result.importances_std
+    }).sort_values('Importance', ascending=False)
+
+    print("\n📊 Top 10 Features (Permutation Importance):")
+    for _, row in feature_importance_df.head(10).iterrows():
+        print(f"  {row['Feature']:<65s}  {row['Importance']:.4f} ± {row['Std']:.4f}")
+
+    # Plot permutation importances
+    plt.figure(figsize=(10, 6))
+    plt.barh(
+        feature_importance_df['Feature'][::-1],
+        feature_importance_df['Importance'][::-1],
+        xerr=feature_importance_df['Std'][::-1],
+        color='steelblue', alpha=0.8
+    )
+    plt.xlabel('Permutation Importance (mean decrease in concordance)', fontsize=12)
+    plt.title('RSF Feature Importance (Permutation)', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig('rsf_permutation_importance.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("✓ Saved: rsf_permutation_importance.png")
+
+    # RSF actual vs predicted plot
+    plt.figure(figsize=(10, 6))
+    plt.scatter(y_test_orig, rsf_predictions, alpha=0.3, s=10, color='forestgreen', edgecolors='none')
+    plt.plot([y_test_orig.min(), y_test_orig.max()],
+             [y_test_orig.min(), y_test_orig.max()], 'r--', lw=2, label='Perfect Prediction')
+    plt.xlabel('Actual Survival Months', fontsize=13)
+    plt.ylabel('Predicted Survival Months', fontsize=13)
+    plt.title(f'Random Survival Forest: Actual vs Predicted\nR²={rsf_r2:.3f}  RMSE={rsf_rmse:.2f} months',
+              fontsize=14, fontweight='bold')
+    plt.legend(fontsize=11)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('rsf_actual_vs_predicted.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("✓ Saved: rsf_actual_vs_predicted.png")
+
+    # Combined predictions CSV
+    rsf_predictions_df = pd.DataFrame({
+        'Patient_ID':            patient_ids_test.values,
+        'Actual_Survival_Months': y_test_orig.values,
+        'RSF_Predicted_Survival': rsf_predictions,
+        'NN_Predicted_Survival':  test_predictions,
+        'RSF_Absolute_Error':     np.abs(y_test_orig.values - rsf_predictions),
+        'NN_Absolute_Error':      np.abs(y_test_orig.values - test_predictions)
+    })
+    rsf_predictions_df.to_csv('model_comparison_predictions.csv', index=False)
+    print("✓ Saved: model_comparison_predictions.csv")
+
+    # Model comparison table
+    print("\n" + "="*60)
+    print("MODEL COMPARISON")
+    print("="*60)
+    print(f"\n{'Metric':<12} {'Neural Network':>18} {'Random Survival Forest':>24}")
+    print("-"*56)
+    print(f"{'RMSE':<12} {test_rmse:>18.2f} {rsf_rmse:>24.2f}")
+    print(f"{'MAE':<12} {test_mae:>18.2f} {rsf_mae:>24.2f}")
+    print(f"{'R²':<12} {test_r2:>18.3f} {rsf_r2:>24.3f}")
+
+    winner = "Random Survival Forest" if rsf_r2 > test_r2 else "Neural Network"
+    print(f"\n🏆 Best Model: {winner}")
+
+except ImportError:
+    print("\n⚠️ scikit-survival not found in this environment.")
+    print("  Activate seer_env and run: conda install -c conda-forge scikit-survival")
+
+# ============================================================
+# FINAL SUMMARY
+# ============================================================
+
+print("\n" + "="*60)
+print("🎉 COMPLETE ANALYSIS FINISHED!")
+print("="*60)
+
+print(f"\n📊 Neural Network:  R²={test_r2:.3f}  RMSE={test_rmse:.2f}  MAE={test_mae:.2f}")
+try:
+    print(f"📊 RSF:             R²={rsf_r2:.3f}  RMSE={rsf_rmse:.2f}  MAE={rsf_mae:.2f}")
+except NameError:
+    pass
+
+print("\n" + "="*60)
