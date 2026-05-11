@@ -298,35 +298,46 @@ else:
     print("  None - All features are complete!")
 
 # ============================================================
-# STEP 12b: APPLY RSF IMPORTANCE WEIGHTS TO NN INPUT FEATURES
+# STEP 12b: APPLY DT IMPORTANCE WEIGHTS TO NN INPUT FEATURES
 # ============================================================
 # IMPORTANT: This weighted copy (X_nn) is used ONLY for the neural
 # network. The RSF receives the original unweighted X to avoid
 # distorting its internal distance/splitting calculations.
 #
-# Weights are scaled relative to the mean importance (mean = 1.0),
-# so important features are amplified while low-importance features
-# are reduced modestly rather than being crushed toward zero.
+# Weights are the full-precision feature importances from the
+# trained Decision Tree Regressor (dt_model.feature_importances_),
+# retrieved directly from VS Code — not approximated from a chart.
 #
-# An additional sqrt() cap is applied to prevent Year of diagnosis
-# (5.27x) from dominating so heavily that gradients collapse.
+# Feature names here match the NN feature_columns list (Step 12),
+# which uses standardized names without the _Scaled suffix.
+# The DT used _Scaled suffixes internally but the importance values
+# are identical — only the column name reference differs.
+#
+# Weights are scaled relative to the mean importance (mean = 1.0),
+# then sqrt() is applied to compress extreme values and prevent
+# Year of diagnosis (~5.3x raw) from collapsing gradients.
 
 print("\n" + "="*60)
-print("STEP 12b: APPLYING RSF IMPORTANCE WEIGHTS TO NN FEATURES")
+print("STEP 12b: APPLYING DT IMPORTANCE WEIGHTS TO NN FEATURES")
 print("="*60)
 
-rsf_importance_raw = {
-    'Year of diagnosis':                                                    0.540,
-    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded':   0.310,
-    'RX Summ--Surg Prim Site (1998+)_Encoded':                             0.080,
-    'SEER historic stage A (1973-2015)_Encoded':                           0.030,
-    'Treatment_Days':                                                       0.020,
-    'Derived Summary Grade 2018 (2018+) with NULL_Encoded':                0.015,
-    'Age_Mean':                                                             0.013,
-    'Tumor_Size_mm':                                                        0.012,
-    'Sex_Encoded':                                                          0.003,
-    'Marital status at diagnosis_Encoded':                                  0.002,
+# Full-precision importances from dt_model.feature_importances_
+# (Decision Tree Regressor, random_state=31, trained on 865,036 patients)
+dt_importance_raw = {
+    'Year of diagnosis':                                                    0.5429334697239565,
+    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded':   0.3075706737782824,
+    'RX Summ--Surg Prim Site (1998+)_Encoded':                             0.07825188568694544,
+    'SEER historic stage A (1973-2015)_Encoded':                           0.027238293856897022,
+    'Treatment_Days':                                                       0.013731478467679865,
+    'Derived Summary Grade 2018 (2018+) with NULL_Encoded':                0.011505179855461095,
+    'Age_Mean':                                                             0.008133341640781075,
+    'Tumor_Size_mm':                                                        0.007543539540160894,
+    'Sex_Encoded':                                                          0.0025086730294923702,
+    'Marital status at diagnosis_Encoded':                                  0.0005834644203433181,
 }
+
+# Alias so downstream code is unchanged
+rsf_importance_raw = dt_importance_raw
 
 # Scale relative to mean, then apply sqrt to compress extreme values
 mean_importance = sum(rsf_importance_raw.values()) / len(rsf_importance_raw)
@@ -675,6 +686,7 @@ torch.save(survival_model.state_dict(), 'lung_cancer_survival_nn_log.pth')
 test_predictions_df.to_csv('nn_lung_cancer_predictions_log.csv', index=False)
 print("✓ Model and predictions saved")
 
+
 # ============================================================
 # FINAL SUMMARY
 # ============================================================
@@ -684,9 +696,4 @@ print("🎉 COMPLETE ANALYSIS FINISHED!")
 print("="*60)
 
 print(f"\n📊 Neural Network:  R²={test_r2:.3f}  RMSE={test_rmse:.2f}  MAE={test_mae:.2f}")
-try:
-    print(f"📊 RSF:             R²={rsf_r2:.3f}  RMSE={rsf_rmse:.2f}  MAE={rsf_mae:.2f}")
-except NameError:
-    pass
-
 print("\n" + "="*60)

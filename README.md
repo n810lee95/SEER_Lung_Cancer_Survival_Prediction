@@ -125,16 +125,16 @@ Test Set Performance:
 
 | Rank | Feature | Importance Score |
 |---|---|---|
-| 1 | Year of diagnosis | 0.5429 |
-| 2 | COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded | 0.3076 |
-| 3 | RX Summ–Surg Prim Site (1998+)_Encoded | 0.0783 |
-| 4 | SEER historic stage A (1973–2015)_Encoded | 0.0272 |
-| 5 | Treatment_Days_Scaled | 0.0137 |
-| 6 | Derived Summary Grade 2018 (2018+) with NULL_Encoded | 0.0115 |
-| 7 | Age_Mean_Scaled | 0.0081 |
-| 8 | Tumor_Size_mm_Scaled | 0.0075 |
-| 9 | Sex_Encoded | 0.0025 |
-| 10 | Marital status at diagnosis_Encoded | 0.0006 |
+| 1 | Year of diagnosis | 0.54293346972 |
+| 2 | COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded | 0.30757067378 |
+| 3 | RX Summ–Surg Prim Site (1998+)_Encoded | 0.07825188569 |
+| 4 | SEER historic stage A (1973–2015)_Encoded | 0.02723829386 |
+| 5 | Treatment_Days_Scaled | 0.01373147847 |
+| 6 | Derived Summary Grade 2018 (2018+) with NULL_Encoded | 0.01150517986 |
+| 7 | Age_Mean_Scaled | 0.00813334164 |
+| 8 | Tumor_Size_mm_Scaled | 0.00754353954 |
+| 9 | Sex_Encoded | 0.00250867303 |
+| 10 | Marital status at diagnosis_Encoded | 0.00058346442|
 
 ### 3.7 Output Files
 
@@ -214,14 +214,23 @@ These weights are derived from Decision Tree feature importances and applied in 
 
 ### 4.6 Expected Terminal Output
 
-```
-Epoch [50/500]   Train Loss: ~1.06  Test Loss: ~1.49  LR: 0.001000
-Epoch [100/500]  Train Loss: ~0.55  Test Loss: ~1.04  LR: 0.001000
+STEP 12b: APPLYING DT IMPORTANCE WEIGHTS TO NN FEATURES
+  Sqrt-scaled importance weights (sqrt of mean-relative score):
+    Year of diagnosis                                                 2.3301
+    COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded 1.7538
+    ...
+  ✓ Weighted feature matrix (X_nn) created for neural network
+  ✓ Original feature matrix (X) preserved for Random Survival Forest
+
+Epoch [50/500]   Train Loss: ~0.62  Test Loss: ~0.96  LR: 0.001000
+Epoch [100/500]  Train Loss: ~0.52  Test Loss: ~0.87  LR: 0.001000
 ...
-Epoch [500/500]  Train Loss: ~0.43  Test Loss: ~1.38  LR: 0.001000
+Epoch [500/500]  Train Loss: ~0.43  Test Loss: ~0.95  LR: 0.001000
 Training complete!
-Unique log-scale predictions: 807  ✓ Predictions vary as expected
-```
+Unique log-scale predictions: 742  ✓ Predictions vary as expected
+
+Predicted survival (months): min=1.96  max=6.07  mean=2.93  median=2.86
+Actual survival (months):    min=0.00  max=275.00  mean=23.32  median=9.00
 
 ### 4.7 Troubleshooting: Constant Predictions
 
@@ -369,8 +378,8 @@ The median survival gap between Q1 and Q4 is **38 months** (43 vs 5). Q1's 12.3%
 | Aspect | Decision Tree | Neural Network | Random Survival Forest |
 |---|---|---|---|
 | Best use case | Interpretable baseline; feature importance source | Complex nonlinear patterns with log-scale regularisation | Survival ranking; censoring; clinical risk stratification |
-| Primary metric | R² = 0.752 | R² = −0.343 *(needs improvement)* | C-index = 0.761 |
-| MAE | 10.34 months | 22.74 months *(near-constant predictions)* | N/A (risk score output) |
+| Primary metric | R² = 0.752 | R² = −0.286 (needs improvement) | C-index = 0.761 |
+| MAE | 10.34 months | 21.59 months (compressed range: 1.96–6.07 months predicted) | N/A (risk score output) |
 | Handles censoring | No | No | Yes |
 | Predicts exact months | Yes | Yes *(unreliable currently)* | No (risk score + survival curve) |
 | Training time | ~1 min | ~5–10 min | ~15–30 min on 614k patients |
@@ -384,7 +393,7 @@ The median survival gap between Q1 and Q4 is **38 months** (43 vs 5). Q1's 12.3%
 |---|---|---|
 | Decision Tree | ✅ Production-ready | Best regression model (R² = 0.752, MAE = 10.3 months). Use as primary survival time estimator. |
 | Random Survival Forest | ✅ Production-ready | Strongest model for risk stratification and survival curve analysis. C-index 0.761 is competitive with published literature. |
-| Neural Network | ⚠️ Needs improvement | Currently underperforming (near-constant predictions, R² < 0). Recommend removing Step 12b importance weighting and retraining without input scaling as the next diagnostic step. |
+| Neural Network | ⚠️ Needs improvement | Predictions now vary (range 1.96–6.07 months) but R² remains negative (−0.286). The model is learning something but the predicted range is too narrow relative to actual survival (0–275 months). Recommend removing Step 12b importance weighting entirely and retraining without input scaling as the next diagnostic step.|
 
 ---
 
