@@ -1,0 +1,11 @@
+﻿# SEER data must NEVER be committed to this repository, per the SEER
+# Research Data Use Agreement (no redistribution of Data or Data derived
+# from it).
+*.csv
+*.csv.dic
+*.sl
+*.dta
+*.sav
+*.rds
+*.RData
+*.Rhistory
