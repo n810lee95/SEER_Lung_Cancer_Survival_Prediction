@@ -30,8 +30,7 @@ print("="*60)
 print("STEP 1: LOADING DATA")
 print("="*60)
 
-df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER_SQL_Output.csv",
-                 low_memory=False)
+df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER Lung Cancer\SEER-Lung-Cleanup\SEER_SQL_Output.csv", low_memory=False)
 
 print(f"Original dataset size: {len(df)} patients")
 print(f"Number of columns: {len(df.columns)}")
@@ -157,8 +156,7 @@ categorical_cols = [
     'Marital status at diagnosis',
     'SEER historic stage A (1973-2015)',
     'Derived Summary Grade 2018 (2018+) with NULL',
-    'RX Summ--Surg Prim Site (1998+)',
-    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)'
+    'RX Summ--Surg Prim Site (1998+)'
 ]
 
 for col in categorical_cols:
@@ -272,6 +270,7 @@ print("\n" + "="*60)
 print("STEP 12: SELECTING FEATURES AND TARGETS")
 print("="*60)
 
+# COD excluded: cause of death is only known after the outcome (target leakage)
 feature_columns = [
     'Age_Mean',
     'Tumor_Size_mm',
@@ -281,8 +280,7 @@ feature_columns = [
     'Marital status at diagnosis_Encoded',
     'SEER historic stage A (1973-2015)_Encoded',
     'Derived Summary Grade 2018 (2018+) with NULL_Encoded',
-    'RX Summ--Surg Prim Site (1998+)_Encoded',
-    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded'
+    'RX Summ--Surg Prim Site (1998+)_Encoded'
 ]
 
 X = df[feature_columns].copy()
@@ -315,25 +313,24 @@ else:
 #
 # Weights are scaled relative to the mean importance (mean = 1.0),
 # then sqrt() is applied to compress extreme values and prevent
-# Year of diagnosis (~5.3x raw) from collapsing gradients.
+
 
 print("\n" + "="*60)
 print("STEP 12b: APPLYING DT IMPORTANCE WEIGHTS TO NN FEATURES")
 print("="*60)
 
-# Full-precision importances from dt_model.feature_importances_
-# (Decision Tree Regressor, random_state=31, trained on 865,036 patients)
+# Full-precision importances from the rerun Decision Tree Regressor
+# (COD removed; random_state=31)
 dt_importance_raw = {
-    'Year of diagnosis':                                                    0.5429334697239565,
-    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded':   0.3075706737782824,
-    'RX Summ--Surg Prim Site (1998+)_Encoded':                             0.07825188568694544,
-    'SEER historic stage A (1973-2015)_Encoded':                           0.027238293856897022,
-    'Treatment_Days':                                                       0.013731478467679865,
-    'Derived Summary Grade 2018 (2018+) with NULL_Encoded':                0.011505179855461095,
-    'Age_Mean':                                                             0.008133341640781075,
-    'Tumor_Size_mm':                                                        0.007543539540160894,
-    'Sex_Encoded':                                                          0.0025086730294923702,
-    'Marital status at diagnosis_Encoded':                                  0.0005834644203433181,
+    'RX Summ--Surg Prim Site (1998+)_Encoded':               0.5226494560411971,
+    'SEER historic stage A (1973-2015)_Encoded':             0.23173726796898558,
+    'Age_Mean':                                               0.08978101085309777,
+    'Year of diagnosis':                                      0.07229377307016081,
+    'Tumor_Size_mm':                                          0.03695499122008189,
+    'Treatment_Days':                                         0.02965506780956041,
+    'Sex_Encoded':                                            0.014780523602287942,
+    'Derived Summary Grade 2018 (2018+) with NULL_Encoded':  0.0015839819963654488,
+    'Marital status at diagnosis_Encoded':                    0.0005639274382630975,
 }
 
 # Alias so downstream code is unchanged
@@ -378,6 +375,17 @@ print("="*60)
     random_state=31
 )
 
+# STEP 13b: carve a validation set out of the training data
+# Validation guides the LR scheduler; the test set stays untouched until the end
+(X_nn_train, X_nn_val,
+ y_train_log, y_val_log,
+ y_train_orig, y_val_orig) = train_test_split(
+    X_nn_train, y_train_log, y_train_orig,
+    test_size=0.1,
+    random_state=31
+)
+print(f"Validation set: {len(X_nn_val)} patients (carved from training)")
+
 _, patient_ids_test, _, _ = train_test_split(
     patient_ids, y_log,
     test_size=0.2,
@@ -406,6 +414,9 @@ test_tensor          = torch.from_numpy(test_features_np).float()
 test_target_tensor   = torch.from_numpy(test_target_np).float()
 
 input_size = features_tensor.shape[1]
+
+val_tensor        = torch.from_numpy(X_nn_val.values.astype(np.float32)).float()
+val_target_tensor = torch.from_numpy(y_val_log.values.astype(np.float32).reshape(-1, 1)).float()
 
 print(f"Features tensor shape: {features_tensor.shape}")
 print(f"Target tensor shape: {target_tensor.shape}")
@@ -495,13 +506,13 @@ for epoch in range(num_epochs):
     if (epoch + 1) % 50 == 0:
         survival_model.eval()
         with torch.no_grad():
-            test_pred = survival_model(test_tensor)
-            test_loss = criterion(test_pred, test_target_tensor)
+            test_pred = survival_model(val_tensor)
+            test_loss = criterion(test_pred, val_target_tensor)
             test_losses.append(test_loss.item())
         scheduler.step(test_loss)
         current_lr = optimizer.param_groups[0]['lr']
         print(f'Epoch [{epoch+1}/{num_epochs}]  Train Loss: {loss.item():.6f}  '
-              f'Test Loss: {test_loss.item():.6f}  LR: {current_lr:.6f}')
+              f'Validation Loss: {test_loss.item():.6f}  LR: {current_lr:.6f}')
 
 print("\n✓ Training complete!")
 
@@ -522,8 +533,8 @@ plt.subplot(1, 2, 2)
 test_epochs = np.arange(50, len(test_losses)*50 + 1, 50)
 plt.plot(test_epochs, test_losses, color='red', marker='o', linewidth=2, markersize=3)
 plt.xlabel('Epoch', fontsize=12)
-plt.ylabel('Test Loss (Huber)', fontsize=12)
-plt.title('Test Loss Over Time', fontsize=14, fontweight='bold')
+plt.ylabel('Validation Loss (Huber)', fontsize=12)
+plt.title('Validation Loss Over Time', fontsize=14, fontweight='bold')
 plt.grid(True, alpha=0.3)
 
 plt.tight_layout()

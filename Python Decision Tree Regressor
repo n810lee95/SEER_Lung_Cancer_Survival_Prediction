@@ -9,7 +9,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import seaborn as sns
 
 # Load SEER lung cancer data
-df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER_SQL_Output.csv")
+df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER Lung Cancer\SEER-Lung-Cleanup\SEER_SQL_Output.csv")
 
 # Check data types and info
 print("Original Dataset Info:")
@@ -157,14 +157,13 @@ categorical_cols = [
     'Marital status at diagnosis',
     'SEER historic stage A (1973-2015)',
     'Derived Summary Grade 2018 (2018+) with NULL',
-    'RX Summ--Surg Prim Site (1998+)',
-    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)'
+    'RX Summ--Surg Prim Site (1998+)'
 ]
 
 # Fill missing categorical values with 'Unknown'
 for col in categorical_cols:
     if col in df.columns:
-        df[col].fillna('Unknown', inplace=True)
+        df[col] = df[col].fillna('Unknown')
         
         # Label encode
         le = LabelEncoder()
@@ -202,6 +201,7 @@ for col in numeric_features:
 # ============================================================
 
 # Select features for modeling
+# COD excluded: cause of death is only known after the outcome (target leakage)
 feature_columns = [
     'Age_Mean_Scaled',
     'Tumor_Size_mm_Scaled',
@@ -211,8 +211,7 @@ feature_columns = [
     'Marital status at diagnosis_Encoded',
     'SEER historic stage A (1973-2015)_Encoded',
     'Derived Summary Grade 2018 (2018+) with NULL_Encoded',
-    'RX Summ--Surg Prim Site (1998+)_Encoded',
-    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded'
+    'RX Summ--Surg Prim Site (1998+)_Encoded'
 ]
 
 # Create feature matrix X and target y
@@ -444,7 +443,7 @@ results_df = pd.DataFrame({
     'Actual_Survival_Months': y_test.values,
     'Predicted_Survival_Months': y_pred_test,
     'Absolute_Error': np.abs(y_test.values - y_pred_test),
-    'Percentage_Error': np.abs(y_test.values - y_pred_test) / y_test.values * 100
+    'Percentage_Error': np.abs(y_test.values - y_pred_test) / (y_test.values + 1) * 100
 })
 results_df.to_csv('lung_cancer_survival_predictions.csv', index=False)
 print("Predictions saved as 'lung_cancer_survival_predictions.csv'")

@@ -32,7 +32,7 @@ print("="*60)
 print("STEP 1: LOADING DATA")
 print("="*60)
 
-df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER_SQL_Output.csv")
+df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER Lung Cancer\SEER-Lung-Cleanup\SEER_SQL_Output.csv", low_memory=False)
 
 print(f"Original Dataset size: {len(df)} patients")
 print(f"Number of columns: {len(df.columns)}")
@@ -214,8 +214,7 @@ categorical_cols = [
     'Marital status at diagnosis',
     'SEER historic stage A (1973-2015)',
     'Derived Summary Grade 2018 (2018+) with NULL',
-    'RX Summ--Surg Prim Site (1998+)',
-    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)'
+    'RX Summ--Surg Prim Site (1998+)'
 ]
 
 for col in categorical_cols:
@@ -251,6 +250,8 @@ print("\n" + "="*60)
 print("STEP 9: SELECTING FEATURES")
 print("="*60)
 
+# COD excluded as a feature: it defines the event (Step 3b), so using it
+# as an input would leak the outcome into the model
 feature_columns = [
     'Age_Mean',
     'Tumor_Size_mm',
@@ -260,8 +261,7 @@ feature_columns = [
     'Marital status at diagnosis_Encoded',
     'SEER historic stage A (1973-2015)_Encoded',
     'Derived Summary Grade 2018 (2018+) with NULL_Encoded',
-    'RX Summ--Surg Prim Site (1998+)_Encoded',
-    'COD to site recode ICD-O-3 2023 Revision Expanded (1999+)_Encoded'
+    'RX Summ--Surg Prim Site (1998+)_Encoded'
 ]
 
 X = df[feature_columns].copy().astype(np.float64)
@@ -699,7 +699,7 @@ print(f"""
    • Q1 (Lowest Risk): patients the model is most confident will survive longer
    • Q4 (Highest Risk): patients the model flags as highest mortality risk
    • Median survival gap between Q1 and Q4 = model's practical clinical range
-   • Event% rising from Q1→Q4 confirms the risk score is well-calibrated
+   • Event% rising from Q1→Q4 shows the risk score discriminates well (ranks patients correctly)
    • IQR (P25–P75) shows how much individual variation exists within each group
 """)
 

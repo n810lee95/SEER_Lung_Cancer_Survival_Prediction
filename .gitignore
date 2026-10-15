@@ -9,3 +9,6 @@
 *.rds
 *.RData
 *.Rhistory
+*.pkl
+*.pth
+*.csv
