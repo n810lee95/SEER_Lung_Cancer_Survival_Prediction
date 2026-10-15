@@ -11,4 +11,4 @@
 *.Rhistory
 *.pkl
 *.pth
-*.csv
+.vscode/

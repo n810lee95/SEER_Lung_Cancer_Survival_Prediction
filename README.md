@@ -7,7 +7,22 @@
 
 ---
 
+## Summary
+
+Three models predicting lung cancer survival for ~865,000 SEER patients diagnosed 2000–2022:
+
+| Model | Test result | Takeaway |
+|---|---|---|
+| Random Survival Forest | C-index 0.72 | Best for ranking patient risk; handles censoring |
+| Decision Tree Regressor | R² 0.47, MAE 15.9 months | Interpretable baseline |
+| PyTorch Neural Network | R² −0.32 | Underperforms the trees; diagnosis in [Section 4.6](#46-performance-results-v4) |
+
+**Key finding:** earlier (v3) results were inflated by target leakage, because cause of death was used as a feature. Removing it dropped Decision Tree R² from 0.75 to 0.47 and RSF C-index from 0.76 to 0.72. The v4 numbers above are the corrected results. Surgery, stage, and age are the strongest predictors in both tree models.
+
+---
+
 ## Table of Contents
+0. [Summary](#summary)
 1. [Data Source](#1-data-source)
 2. [Shared Preprocessing](#2-shared-preprocessing-steps)
 3. [Model 1: Decision Tree Regressor](#3-model-1-decision-tree-regressor)
@@ -24,7 +39,11 @@
 
 This analysis uses data extracted from the Surveillance, Epidemiology, and End Results (SEER) Program, maintained by the National Cancer Institute. The dataset covers malignant lung and bronchus cancer cases across 17 registries from 2000 to 2022.
 
-> **Note:** `SEER_LUNG_11_14_EXT.csv` is a truncated example file containing only 2011–2014 records. The full analysis requires the complete SEER SQL export (`SEER_SQL_Output.csv`).
+> **Data access:** SEER data is not included in this repository, per the SEER Research Data Use Agreement. To reproduce this analysis, request SEER Research Data access at [seer.cancer.gov/data/access.html](https://seer.cancer.gov/data/access.html) and build an extract using the variable list in [Section 1.3](#13-columns-in-the-extract).
+>
+> **Not included in this repository:**
+> - SEER data and patient-level outputs (prediction CSVs)
+> - Trained model files (`.pkl`, `.pth`). The Random Survival Forest model is ~340 MB, over GitHub's file size limit. Running the scripts in [Section 7](#7-environment-setup) regenerates all models and outputs.
 
 ### 1.1 Citation
 
@@ -41,7 +60,6 @@ Surveillance, Epidemiology, and End Results (SEER) Program (www.seer.cancer.gov)
 | Records used in RSF (after removing 0-month survival) | 767,537 |
 | Diagnosis years | 2000–2022 |
 | Registries | 17 (SEER Research Data) |
-| Example file (truncated) | `SEER_LUNG_11_14_EXT.csv` (2011–2014) |
 
 > ⚠️ **Cohort limitation:** the current extraction contains only two cause-of-death values, `Lung And Bronchus` (death from lung cancer) and `Alive`. Patients who died of other causes were excluded upstream. See [Section 8](#8-known-limitations--to-do).
 
@@ -55,7 +73,7 @@ Surveillance, Epidemiology, and End Results (SEER) Program (www.seer.cancer.gov)
 | Marital status at diagnosis | Categorical | Feature (7 unique values) |
 | Year of diagnosis | Numeric | Feature |
 | SEER historic stage A (1973–2015) | Categorical | Feature (5 unique values) |
-| Derived Summary Grade 2018 (2018+) with NULL | Categorical | Feature (11–16 unique values; ~77% missing, only recorded 2018+) |
+| Derived Summary Grade 2018 (2018+) with NULL | Categorical | Feature (11 unique values; ~77% missing, only recorded 2018+) |
 | RX Summ–Surg Prim Site (1998+) | Categorical | Feature (25 unique values) |
 | Time from diagnosis to treatment in days recode with NULL | Categorical → Numeric | Feature; ~35% missing |
 | Tumor Size Over Time Recode (1988+) with NULL | Categorical → Numeric | Feature; ~28% missing |
@@ -84,7 +102,7 @@ All three models share the following preprocessing pipeline before model-specifi
 
 ## 3. Model 1: Decision Tree Regressor
 
-**Script:** `Python Decision Tree Regressor.py`
+**Script:** `decision_tree_regressor.py`
 
 ### 3.1 Purpose
 
@@ -113,12 +131,12 @@ Train: 692,028 patients &nbsp;•&nbsp; Test: 173,008 patients
 
 | Metric | Train | Test | Interpretation |
 |---|---|---|---|
-| RMSE | 27.86 months | 28.05 months | Average error, penalizing large misses more |
-| MAE | 15.78 months | 15.87 months | Typical patient is off by ~16 months |
+| RMSE | 27.87 months | 28.05 months | Average error, penalizing large misses more |
+| MAE | 15.78 months | 15.87 months | Average absolute error ~16 months (median 8) |
 | R² | 0.472 | 0.467 | Explains ~47% of variance in survival |
 | Overfitting (R² diff) | — | 0.005 | ✓ Negligible |
 
-**Prediction error distribution (test):** median 8.04 months; 75th percentile 16.70; 90th percentile 38.94; 95th percentile 61.45.
+**Prediction error distribution (test):** median 8.04 months; 75th percentile 16.72; 90th percentile 38.94; 95th percentile 61.45.
 
 > Earlier versions reported R² = 0.752 / MAE = 10.3 months. That result was inflated by target leakage (cause of death used as a feature). See [Changelog](#9-changelog).
 
@@ -126,19 +144,21 @@ Train: 692,028 patients &nbsp;•&nbsp; Test: 173,008 patients
 
 | Rank | Feature | Importance |
 |---|---|---|
-| 1 | RX Summ–Surg Prim Site (1998+)_Encoded | 0.5226 |
+| 1 | RX Summ–Surg Prim Site (1998+)_Encoded | 0.5227 |
 | 2 | SEER historic stage A (1973–2015)_Encoded | 0.2317 |
 | 3 | Age_Mean_Scaled | 0.0898 |
-| 4 | Year of diagnosis | 0.0723 |
+| 4 | Year of diagnosis | 0.0724 |
 | 5 | Tumor_Size_mm_Scaled | 0.0370 |
 | 6 | Treatment_Days_Scaled | 0.0297 |
 | 7 | Sex_Encoded | 0.0148 |
-| 8 | Derived Summary Grade 2018 (2018+) with NULL_Encoded | 0.0016 |
+| 8 | Derived Summary Grade 2018 (2018+) with NULL_Encoded | 0.0015 |
 | 9 | Marital status at diagnosis_Encoded | 0.0006 |
 
 Surgery and stage dominate, which is consistent with established clinical prognostic factors for lung cancer.
 
 ### 3.6 Output Files
+
+*Generated locally when the script runs. CSV and model files are not included in this repository (see [Section 1](#1-data-source)).*
 
 | File | Description |
 |---|---|
@@ -150,11 +170,11 @@ Surgery and stage dominate, which is consistent with established clinical progno
 | `survival_distributions.png` | Distribution comparison: actual vs predicted |
 | `feature_importance_survival.png` | Feature importance bar chart |
 
-### 3.7 Known Warnings
+### 3.7 Known Warnings (resolved in v4)
 
 | Warning | Fix applied |
 |---|---|
-| `DtypeWarning` on Derived Summary Grade column | ⚠️ **Still appears in the v4 Decision Tree run.** Add `low_memory=False` to this script's `pd.read_csv()` (already in the NN and RSF scripts). Mixed types appear to split identical grades into separate codes: this script encodes 16 grade values vs 11 in the other two |
+| `DtypeWarning` on Derived Summary Grade column | `low_memory=False` in `pd.read_csv()`. Mixed-type parsing had split identical grades into separate codes (16 values instead of 11) |
 | `ChainedAssignmentError` on `df[col].fillna(..., inplace=True)` | Replaced with `df[col] = df[col].fillna('Unknown')` |
 | `RuntimeWarning: divide by zero` in `Percentage_Error` | Denominator changed to `(actual + 1)` |
 
@@ -162,7 +182,7 @@ Surgery and stage dominate, which is consistent with established clinical progno
 
 ## 4. Model 2: PyTorch Neural Network
 
-**Script:** `Pytorch Neural Network.py`
+**Script:** `pytorch_neural_network.py`
 
 ### 4.1 Purpose
 
@@ -267,6 +287,8 @@ Actual survival (months):    min=0.00  max=275.00  mean=23.32  median=9.00
 
 ### 4.8 Output Files
 
+*Generated locally when the script runs. CSV and model files are not included in this repository (see [Section 1](#1-data-source)).*
+
 | File | Description |
 |---|---|
 | `lung_cancer_survival_nn_log.pth` | Trained network weights (PyTorch state dict) |
@@ -281,7 +303,7 @@ Actual survival (months):    min=0.00  max=275.00  mean=23.32  median=9.00
 
 ## 5. Model 3: Random Survival Forest
 
-**Script:** `Random Survival Forest.py`
+**Script:** `random_survival_forest.py`
 
 ### 5.1 Purpose
 
@@ -379,6 +401,8 @@ The median survival gap between Q1 and Q4 is **26 months** (31 vs 5), and the lu
 
 ### 5.10 Output Files
 
+*Generated locally when the script runs. CSV and model files are not included in this repository (see [Section 1](#1-data-source)).*
+
 | File | Description |
 |---|---|
 | `lung_cancer_rsf_model.pkl` | Trained RSF model |
@@ -410,8 +434,8 @@ The median survival gap between Q1 and Q4 is **26 months** (31 vs 5), and the lu
 
 | Model | Status | Notes |
 |---|---|---|
-| Decision Tree | ✅ Validated (v4) | R² = 0.467 with no overfitting; clinically sensible feature ranking |
-| Random Survival Forest | ✅ Validated (v4) | C-index = 0.721; strongest model for risk stratification |
+| Decision Tree | ✅ Complete (v4) | R² = 0.467 with no overfitting; clinically sensible feature ranking |
+| Random Survival Forest | ✅ Complete (v4) | C-index = 0.721; strongest model for risk stratification |
 | Neural Network | ⚠️ Benchmark, needs work | R² = −0.319; likely train/eval-mode mismatch (see [Section 4.6](#46-performance-results-v4)). Trees outperform it on this tabular data |
 
 ---
@@ -449,9 +473,9 @@ conda install -c conda-forge scikit-survival scikit-learn pandas numpy matplotli
 ```bash
 conda activate seer
 
-python "Python Decision Tree Regressor.py"
-python "Pytorch Neural Network.py"
-python "Random Survival Forest.py"
+python decision_tree_regressor.py
+python pytorch_neural_network.py
+python random_survival_forest.py
 ```
 
 Run the Decision Tree first: the Neural Network uses its feature importances.
@@ -468,10 +492,10 @@ Run the Decision Tree first: the Neural Network uses its feature importances.
 
 ## 8. Known Limitations / To-Do
 
-- [ ] **Re-extract the SEER cohort to include all causes of death.** The current SQL output contains only `Lung And Bronchus` and `Alive`, so patients who died of other causes were filtered out. This is selection bias: excluded patients skew older and sicker. Next step: re-run the extraction with all cause-of-death values, then either censor other-cause deaths (cause-specific) or model them as a competing risk (Fine-Gray / Aalen-Johansen cumulative incidence).
+- [ ] **Re-extract the SEER cohort to include all causes of death.** The current SQL output contains only `Lung And Bronchus` and `Alive`, so patients who died of other causes were filtered out. This is selection bias: excluded patients likely skew older and sicker. Next step: re-run the extraction with all cause-of-death values, then either censor other-cause deaths (cause-specific) or model them as a competing risk (Fine-Gray / Aalen-Johansen cumulative incidence).
 - [x] ~~Rerun the Neural Network with cause of death removed, v4 importance weights, and the validation set.~~ Done: R² = −0.319 (Section 4.6).
 - [ ] **Fix the Neural Network:** standardize Year of diagnosis, remove Step 12b weighting, check train vs eval mode, add mini-batching (Section 4.6).
-- [ ] **Add `low_memory=False` to the Decision Tree script** so the grade column parses consistently (Section 3.7).
+- [x] ~~Add `low_memory=False` to the Decision Tree script.~~ Done (Section 3.7).
 - [ ] **Add RSF calibration checks** (predicted vs observed survival at 12 and 24 months); the C-index measures ranking only.
 - [ ] **Switch Neural Network categorical inputs from label encoding to one-hot encoding.** Label encoding implies an order (e.g. marital status 0–6) that neural networks treat as meaningful.
 - [ ] **Fit scaler and median imputation on the training set only**, then apply to the test set, to remove minor preprocessing leakage.
@@ -489,7 +513,8 @@ Run the Decision Tree first: the Neural Network uses its feature importances.
   - RSF test C-index: 0.761 → **0.721**
 - Neural Network: updated importance weights from the v4 Decision Tree; added a validation set for the learning-rate scheduler.
   - Test R²: −0.286 → **−0.319**; MAE: 21.6 → **22.2 months** (still underperforms; diagnosis in Section 4.6)
-- Fixed data file paths, `fillna` chained-assignment warning, and divide-by-zero in percentage error; added `low_memory=False` to the NN and RSF scripts (Decision Tree script still pending).
+- Fixed data file paths, `fillna` chained-assignment warning, and divide-by-zero in percentage error; added `low_memory=False` to all three scripts.
+- Renamed scripts to standard `.py` filenames (`decision_tree_regressor.py`, `pytorch_neural_network.py`, `random_survival_forest.py`).
 - Moved to the `seer` conda environment (Python 3.12) with CPU PyTorch to resolve the Windows DLL import error.
 - Corrected RSF interpretation text: a rising event rate across quartiles shows discrimination, not calibration.
 

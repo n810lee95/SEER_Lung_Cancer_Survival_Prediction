@@ -9,7 +9,7 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import seaborn as sns
 
 # Load SEER lung cancer data
-df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER Lung Cancer\SEER-Lung-Cleanup\SEER_SQL_Output.csv")
+df = pd.read_csv(r"C:\Users\natha\OneDrive\Desktop\Nathan\Datacamp Python\SEER\SEER Lung Cancer\SEER-Lung-Cleanup\SEER_SQL_Output.csv", low_memory=False)
 
 # Check data types and info
 print("Original Dataset Info:")
